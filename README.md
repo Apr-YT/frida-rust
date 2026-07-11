@@ -173,7 +173,7 @@ write_memory(base + 0x100, blob([0x90, 0x90, 0x90]));
 
 `	oml
 [dependencies]
-frida-rust = { git = "https://github.com/Apr-YT/frida-rust-src" }
+frida-rust = { git = "https://github.com/Apr-YT/frida-rust" }
 `
 
 ### Hook 函数
