@@ -1,0 +1,10 @@
+# 交叉编译配置 — Android AArch64 (arm64-v8a)，Windows NDK
+
+[target.aarch64-linux-android]
+linker = "D:/ndk-r27d-windows/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android21-clang.cmd"
+rustflags = [
+    "-C", "link-arg=-LD:/ndk-r27d-windows/toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/21",
+    "-C", "link-arg=-lc",
+    "-C", "link-arg=-ldl",
+    "-C", "link-arg=-llog",
+]
