@@ -46,67 +46,67 @@
 ### 🔧 MCP 工具 (36个)
 
 #### 进程分析
-- list_processes - 列出所有进程
-- get_process_info - 获取进程详细信息
-- list_threads - 列出进程线程
+- `list_processes` - 列出所有进程
+- `get_process_info` - 获取进程详细信息
+- `list_threads` - 列出进程线程
 
 #### 模块分析
-- list_modules - 列出加载的模块
-- get_module_info - 获取模块详细信息
-- find_symbol - 查找符号地址
-- list_symbols - 列出导出符号
+- `list_modules` - 列出加载的模块
+- `get_module_info` - 获取模块详细信息
+- `find_symbol` - 查找符号地址
+- `list_symbols` - 列出导出符号
 
 #### 内存操作
-- read_memory - 读取进程内存
-- write_memory - 写入进程内存
-- search_pattern - 搜索字节模式
-- disassemble - 反汇编代码
-- dump_memory - dump内存到文件
+- `read_memory` - 读取进程内存
+- `write_memory` - 写入进程内存
+- `search_pattern` - 搜索字节模式
+- `disassemble` - 反汇编代码
+- `dump_memory` - dump内存到文件
 
 #### Hook 操作
-- hook_function - Hook目标函数
-- inject_library - 注入共享库
-- attach_process - 附着到进程
+- `hook_function` - Hook目标函数
+- `inject_library` - 注入共享库
+- `attach_process` - 附着到进程
 
 #### 反检测
-- apply_stealth - 应用反检测措施
-- apply_smart_stealth - 智能应用反检测
-- analyze_anti_debug - 分析反调试技术
-- list_stealth_modules - 列出反检测模块
+- `apply_stealth` - 应用反检测措施
+- `apply_smart_stealth` - 智能应用反检测
+- `analyze_anti_debug` - 分析反调试技术
+- `list_stealth_modules` - 列出反检测模块
 
 #### AI 学习
-- ai_report_problem - 反馈问题并学习
-- ai_query_experience - 查询历史经验
-- ai_learning_stats - 学习统计报告
-- ai_record_success - 记录成功经验
-- ai_update_knowledge - 更新知识库
+- `ai_report_problem` - 反馈问题并学习
+- `ai_query_experience` - 查询历史经验
+- `ai_learning_stats` - 学习统计报告
+- `ai_record_success` - 记录成功经验
+- `ai_update_knowledge` - 更新知识库
 
 #### ESP 分析
-- detect_game_engine - 检测游戏引擎
-- analyze_object_structure - 分析对象结构
-- list_game_templates - 列出游戏模板
-- load_game_template - 加载游戏模板
-- generate_esp_code - 生成ESP代码
-- generate_offsets_config - 生成偏移配置
+- `detect_game_engine` - 检测游戏引擎
+- `analyze_object_structure` - 分析对象结构
+- `list_game_templates` - 列出游戏模板
+- `load_game_template` - 加载游戏模板
+- `generate_esp_code` - 生成ESP代码
+- `generate_offsets_config` - 生成偏移配置
 
 ## 🚀 快速开始
 
 ### 安装
 
-`ash
+```bash
 cargo install frida-rust
-`
+```
 
 ### 使用 MCP Server
 
-`ash
+```bash
 # 启动 MCP 服务器
 frida-rust-mcp
-`
+```
 
 ### 配置到 AI 助手
 
-`json
+```json
 {
   "mcpServers": {
     "frida-rust": {
@@ -115,13 +115,13 @@ frida-rust-mcp
     }
   }
 }
-`
+```
 
 ## 📖 使用示例
 
 ### AI 智能逆向分析
 
-`python
+```python
 # 1. 检测游戏引擎
 detect_game_engine(pid=12345)
 
@@ -136,11 +136,11 @@ analyze_object_structure(pid=12345, address="0x12345678")
 
 # 5. 生成ESP绘制代码
 generate_esp_code(pid=12345, engine="unreal")
-`
+```
 
 ### AI 自我学习
 
-`python
+```python
 # 遇到问题时反馈
 ai_report_problem(
     problem="注入后被检测",
@@ -158,11 +158,11 @@ ai_record_success(
 
 # 查询历史经验
 ai_query_experience(anti_cheat="TencentACE")
-`
+```
 
 ## 🏗️ 项目结构
 
-`
+```
 src/
 ├── main.rs                # CLI 入口
 ├── lib.rs                 # 库入口
@@ -236,7 +236,7 @@ src/
     ├── win_util.rs        # Windows 工具
     ├── syscall_wrapper.rs # 系统调用封装
     └── mod.rs
-`
+```
 
 ## 📋 支持的平台
 
