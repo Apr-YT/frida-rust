@@ -1,52 +1,31 @@
 @echo off
 echo.
 echo ========================================
-echo   frida-rust v0.2.0 Release Script
+echo   frida-rust v0.2.0 Release
 echo ========================================
 echo.
-
 cd /d D:\project\codex\frida-rust
-
-echo Step 1: Adding all files...
+echo [1/4] Adding files...
 git add -A
-if errorlevel 1 (
-    echo ERROR: git add failed!
-    pause
-    exit /b 1
-)
-
-echo Step 2: Committing changes...
-git commit -m "feat: v0.2.0 - AI Smart Reverse Engineering Framework"
-if errorlevel 1 (
-    echo ERROR: git commit failed!
-    pause
-    exit /b 1
-)
-
-echo Step 3: Creating release tag...
-git tag -a v0.2.0 -m "Release v0.2.0"
-if errorlevel 1 (
-    echo WARNING: Tag creation failed (may already exist)
-)
-
-echo Step 4: Pushing to GitHub...
+if errorlevel 1 goto err
+echo [2/4] Committing...
+git commit -m "feat: v0.2.0 - AI Smart Reverse Engineering"
+if errorlevel 1 goto err
+echo [3/4] Tagging...
+git tag v0.2.0
+echo [4/4] Pushing...
 git push origin main
-if errorlevel 1 (
-    echo ERROR: git push failed!
-    pause
-    exit /b 1
-)
-
+if errorlevel 1 goto err
 git push origin v0.2.0
-if errorlevel 1 (
-    echo WARNING: Tag push failed
-)
-
 echo.
 echo ========================================
-echo   SUCCESS! v0.2.0 Released!
+echo   SUCCESS!
 echo ========================================
 echo.
-echo GitHub: https://github.com/Apr-YT/frida-rust
+pause
+exit
+:err
+echo.
+echo ERROR!
 echo.
 pause
