@@ -4,25 +4,40 @@
 *.dll
 *.so
 *.dylib
+*.o
+*.a
 
-# Release binaries
-/releases/
-
-# Release scripts (????)
-release.bat
-release.ps1
-release_v0.2.0.ps1
+# Cargo
+Cargo.lock
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Build
-*.o
-*.a
+# Release binaries
+/releases/
+
+# Build artifacts
+*.d
+*.pdb
+
+# Test output
+*.profraw
+*.profdata
+lcov.info
+
+# Documentation build
+/doc/
+/book/
+
+# Environment
+.env
+.env.local

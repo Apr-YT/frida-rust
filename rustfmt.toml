@@ -1,0 +1,35 @@
+# Rust ???????
+# https://rust-lang.github.io/rustfmt/
+
+# ?????
+max_width = 100
+
+# ??
+tab_spaces = 4
+
+# ???
+newline_style = "Unix"
+
+# ????
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+
+# ????
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# ??
+normalize_comments = true
+wrap_comments = true
+
+# ??
+fn_args_layout = "Tall"
+
+# ????
+chain_width = 60
+
+# ???
+struct_lit_width = 18
+
+# ??
+enum_discrim_align_threshold = 30
