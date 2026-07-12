@@ -1,31 +1,31 @@
 @echo off
 echo.
 echo ========================================
-echo   frida-rust v0.3.0 发布脚本
+echo   frida-rust v0.3.0 Release Script
 echo ========================================
 echo.
 
 cd /d D:\project\codex\frida-rust
 
-echo [1/4] 添加文件...
+echo [1/4] Adding files...
 git add -A
 if errorlevel 1 goto err
 
-echo [2/4] 提交更改...
-git commit -m "feat: v0.3.0 - 简化MCP工具为树状结构"
+echo [2/4] Committing...
+git commit -m "feat: v0.3.0 - Simplify MCP tools to tree structure"
 if errorlevel 1 goto err
 
-echo [3/4] 创建标签...
+echo [3/4] Tagging...
 git tag v0.3.0
 
-echo [4/4] 推送...
+echo [4/4] Pushing...
 git push origin main
 if errorlevel 1 goto err
 git push origin v0.3.0
 
 echo.
 echo ========================================
-echo   发布成功!
+echo   SUCCESS!
 echo ========================================
 echo.
 goto end
@@ -33,7 +33,7 @@ goto end
 :err
 echo.
 echo ========================================
-echo   发生错误!
+echo   ERROR!
 echo ========================================
 echo.
 
