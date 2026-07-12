@@ -1,6 +1,6 @@
 [package]
 name = "frida-rust"
-version = "0.3.0"
+version = "0.35.0"
 edition = "2021"
 description = "Frida 核心功能的 Rust 实现 - 动态插桩与逆向工程框架"
 license = "MIT"

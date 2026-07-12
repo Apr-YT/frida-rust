@@ -1,76 +1,85 @@
 # Frida-Rust
 
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](https://github.com/Apr-YT/frida-rust)
+[![Version](https://img.shields.io/badge/version-0.35.0-blue.svg)](https://github.com/Apr-YT/frida-rust)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 🚀 **Frida 核心功能的 Rust 实现** - 为 AI 助手打造的智能逆向分析框架
 
-## ✨ 特性
+## ✨ v0.35.0 新特性
 
-### 🛡️ 完整的反检测系统
+### 🤖 AI 全面自我学习
 
-- **智能反检测** - 自动分析反作弊并推荐策略
-- **国内反作弊支持** - 腾讯ACE/TP、米哈游、网易Yidun
-- **10+隐藏模块** - 端口/FD/线程/网络/环境变量
+- **自动经验收集** - 每次操作自动记录成功/失败
+- **智能反馈循环** - 遇到问题自动分析原因
+- **策略迭代优化** - 根据成功率自动调整策略
+- **知识图谱构建** - 反作弊特征关系图
 
-### 🧠 AI 智能分析
+### 🖥️ Web UI 可视化
 
-- **经验学习系统** - 记录成功/失败，自动优化
-- **知识库管理** - 内置30+反作弊特征
+- **实时日志流** - 显示 AI 每一步操作
+- **步骤可视化** - 展示 AI 执行流程
+- **学习进度** - 显示成功率和统计
+- **自动链接** - AI 执行时自动显示访问地址
 
-### 🎯 ESP 绘制分析
+### 🪟 完整 Windows 支持
 
-- **游戏引擎检测** - Unreal/Unity/Source
-- **数据结构分析** - 自动查找偏移量
-- **代码生成** - 生成ESP绘制代码
+- **PE 解析** - Windows 符号查询
+- **内存操作** - 读写搜索全支持
+- **进程分析** - 完整进程信息
 
-## 🔧 MCP 工具 (14个树状结构)
+## 🔧 MCP 工具 (20个树状结构)
 
 ### process/ - 进程操作
-| 工具 | 说明 |
-|------|------|
-| `process_info` | 获取进程完整信息 |
-| `process_attach` | 附着到进程 |
-| `process_inject` | 注入库 |
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `process_info` | ✅ | ✅ |
+| `process_attach` | ✅ | ✅ |
+| `process_inject` | ✅ | ✅ |
 
 ### memory/ - 内存操作
-| 工具 | 说明 |
-|------|------|
-| `memory_read` | 读取内存 |
-| `memory_write` | 写入内存 |
-| `memory_search` | 搜索模式 |
-| `memory_disasm` | 反汇编 |
-| `memory_dump` | dump内存 |
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `memory_read` | ✅ | ✅ |
+| `memory_write` | ✅ | ✅ |
+| `memory_search` | ✅ | ✅ |
+| `memory_disasm` | ✅ | ✅ |
+| `memory_dump` | ✅ | ✅ |
 
 ### hook/ - Hook操作
-| 工具 | 说明 |
-|------|------|
-| `hook_set` | 设置Hook |
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `hook_set` | ✅ | ✅ |
 
 ### stealth/ - 反检测
-| 工具 | 说明 |
-|------|------|
-| `stealth_apply` | 应用反检测 |
-| `stealth_analyze` | 分析反调试 |
-| `stealth_info` | 模块信息 |
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `stealth_apply` | ✅ | ✅ |
+| `stealth_analyze` | ✅ | ✅ |
+| `stealth_info` | ✅ | ✅ |
 
 ### ai/ - AI学习
 | 工具 | 说明 |
 |------|------|
-| `ai_learn` | 记录经验 |
-| `ai_query` | 查询知识 |
+| `ai_learn` | 记录经验/反馈问题/获取建议 |
+| `ai_query` | 查询知识图谱/策略/统计 |
 
 ### esp/ - ESP分析
-| 工具 | 说明 |
-|------|------|
-| `esp_analyze` | 分析游戏 |
-| `esp_generate` | 生成代码 |
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `esp_analyze` | ✅ | ✅ |
+| `esp_generate` | ✅ | ✅ |
 
 ### symbols/ - 符号操作
+| 工具 | Unix | Windows |
+|------|------|---------|
+| `symbols_list` | ✅ | ✅ |
+| `symbols_find` | ✅ | ✅ |
+
+### webui/ - Web UI
 | 工具 | 说明 |
 |------|------|
-| `symbols_list` | 列出符号 |
-| `symbols_find` | 查找符号 |
+| `webui_status` | 获取 Web UI 状态和链接 |
+| `webui_report` | 获取 AI 执行报告 |
 
 ## 🚀 快速开始
 
@@ -98,43 +107,29 @@ cargo install frida-rust
 # 进程分析
 process_info(pid=12345)
 
-# 内存读取
-memory_read(pid=12345, address="0x1234", size=64)
-
 # 智能反检测
 stealth_apply(pid=12345, auto_detect=true)
 
-# AI学习
-ai_learn(action="report", problem="被检测", solution="延迟注入")
+# AI 学习
+ai_learn(action="stats")
 
-# ESP分析
-esp_analyze(pid=12345)
-esp_generate(pid=12345, engine="unreal")
+# Web UI
+webui_status()
+# 输出: 🔗 访问地址: http://localhost:8080
 ```
 
-## 🏗️ 项目结构
+## 🎮 支持的反作弊
 
-```
-src/
-├── main.rs, lib.rs
-├── ai_learning.rs      # AI学习系统
-├── esp_analyzer.rs     # ESP分析器
-├── bin/mcp_server.rs   # MCP入口
-├── mcp/handler.rs      # 14个MCP工具
-├── hook/               # Hook模块
-├── inject/             # 注入模块
-├── memory/             # 内存操作
-├── anti_detect/        # 反检测模块
-├── script/             # 脚本引擎
-├── communication/      # 通信模块
-└── common/             # 公共模块
-```
+- 腾讯 ACE/TP/MTP
+- 米哈游 Protect
+- 网易 Yidun
+- BattlEye/EAC/Vanguard
 
 ## 📋 支持的平台
 
 - ✅ Linux (x86_64, aarch64)
 - ✅ Android (arm64-v8a)
-- ⚠️ Windows (部分)
+- ✅ Windows (x86_64)
 
 ## 🔗 链接
 

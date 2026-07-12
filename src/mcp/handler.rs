@@ -649,7 +649,7 @@ impl FridaMcpServer {
 
 #[tool_handler(
     name = "frida-rust-mcp",
-    version = "0.3.0",
+    version = "0.35.0",
     instructions = "Frida-Rust MCP: 进程分析、内存操作、Hook、反检测、AI学习、ESP分析"
 )]
 impl ServerHandler for FridaMcpServer {}
