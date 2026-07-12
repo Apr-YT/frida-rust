@@ -1,21 +1,28 @@
-# Rust
-target/
-Cargo.lock
+# Compiled files
+/target/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Release binaries
+/releases/
+
+# Release scripts (????)
+release.bat
+release.ps1
+release_v0.2.0.ps1
 
 # IDE
-.idea/
 .vscode/
+.idea/
 *.swp
 *.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
-
-# Temp
-/tmp/
-*.tmp
+# Build
+*.o
+*.a

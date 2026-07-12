@@ -43,7 +43,7 @@
 - **偏移量查找** - 自动查找血量、坐标等关键偏移
 - **代码生成** - 根据分析结果生成 ESP 绘制代码
 
-### 🔧 MCP 工具 (20+)
+### 🔧 MCP 工具 (36个)
 
 #### 进程分析
 - list_processes - 列出所有进程
@@ -53,32 +53,37 @@
 #### 模块分析
 - list_modules - 列出加载的模块
 - get_module_info - 获取模块详细信息
-- ind_symbol - 查找符号地址
+- find_symbol - 查找符号地址
 - list_symbols - 列出导出符号
 
 #### 内存操作
-- ead_memory - 读取进程内存
+- read_memory - 读取进程内存
 - write_memory - 写入进程内存
 - search_pattern - 搜索字节模式
 - disassemble - 反汇编代码
 - dump_memory - dump内存到文件
 
+#### Hook 操作
+- hook_function - Hook目标函数
+- inject_library - 注入共享库
+- attach_process - 附着到进程
+
 #### 反检测
-- pply_stealth - 应用反检测措施
-- pply_smart_stealth - 智能应用反检测
-- nalyze_anti_debug - 分析反调试技术
+- apply_stealth - 应用反检测措施
+- apply_smart_stealth - 智能应用反检测
+- analyze_anti_debug - 分析反调试技术
 - list_stealth_modules - 列出反检测模块
 
 #### AI 学习
-- i_report_problem - 反馈问题并学习
-- i_query_experience - 查询历史经验
-- i_learning_stats - 学习统计报告
-- i_record_success - 记录成功经验
-- i_update_knowledge - 更新知识库
+- ai_report_problem - 反馈问题并学习
+- ai_query_experience - 查询历史经验
+- ai_learning_stats - 学习统计报告
+- ai_record_success - 记录成功经验
+- ai_update_knowledge - 更新知识库
 
 #### ESP 分析
 - detect_game_engine - 检测游戏引擎
-- nalyze_object_structure - 分析对象结构
+- analyze_object_structure - 分析对象结构
 - list_game_templates - 列出游戏模板
 - load_game_template - 加载游戏模板
 - generate_esp_code - 生成ESP代码
@@ -161,9 +166,11 @@ ai_query_experience(anti_cheat="TencentACE")
 src/
 ├── main.rs              # CLI 入口
 ├── lib.rs               # 库入口
+├── ai_learning.rs       # AI学习系统
+├── esp_analyzer.rs      # ESP分析器
 ├── mcp/                 # MCP 服务器
 │   ├── handler.rs       # MCP 工具处理
-│   └── ...
+│   └── mod.rs
 ├── hook/                # Hook 模块
 │   ├── inline.rs        # Inline Hook
 │   ├── got_plt.rs       # GOT/PLT Hook
@@ -174,16 +181,13 @@ src/
 ├── memory/              # 内存操作
 │   ├── scanner.rs       # 内存扫描
 │   └── elf_parser.rs    # ELF 解析
-├── anti_detect/         # 反检测模块
-│   ├── smart_stealth.rs # 智能反检测
-│   ├── port_hide.rs     # 端口隐藏
-│   ├── fd_hide.rs       # FD隐藏
-│   ├── thread_hide.rs   # 线程隐藏
-│   ├── net_hide.rs      # 网络隐藏
-│   ├── env_clean.rs     # 环境清理
-│   └── ...
-├── ai_learning.rs       # AI学习系统
-└── esp_analyzer.rs      # ESP分析器
+└── anti_detect/         # 反检测模块
+    ├── smart_stealth.rs # 智能反检测
+    ├── port_hide.rs     # 端口隐藏
+    ├── fd_hide.rs       # FD隐藏
+    ├── thread_hide.rs   # 线程隐藏
+    ├── net_hide.rs      # 网络隐藏
+    └── env_clean.rs     # 环境清理
 `
 
 ## 📋 支持的平台
@@ -191,6 +195,14 @@ src/
 - ✅ Linux (x86_64, aarch64)
 - ✅ Android (arm64-v8a, armeabi-v7a)
 - ⚠️ Windows (部分功能)
+
+## 🎮 支持的游戏引擎
+
+- Unreal Engine (UE4/UE5)
+- Unity
+- Source Engine
+- Frostbite
+- CryEngine
 
 ## 🤝 贡献
 
