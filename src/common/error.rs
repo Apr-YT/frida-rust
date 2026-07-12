@@ -8,6 +8,21 @@ use std::path::PathBuf;
 /// frida-rust 统一错误类型
 #[derive(Debug, thiserror::Error)]
 pub enum FridaError {
+    // ======================== 模块相关错误 ========================
+    /// 模块未找到
+    #[error("模块未找到: {name}")]
+    ModuleNotFound {
+        /// 模块名称
+        name: String,
+    },
+
+    /// 无效的 PE 文件
+    #[error("无效的 PE 文件: {reason}")]
+    InvalidPE {
+        /// 原因
+        reason: String,
+    },
+
     // ======================== 注入相关错误 ========================
     /// 进程注入失败
     #[error("注入失败: {reason} (PID: {pid})")]

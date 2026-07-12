@@ -12,6 +12,7 @@ pub mod scanner;
 #[cfg(unix)]
 pub mod allocator;
 pub mod elf_parser;
+pub mod pe_parser;
 
 #[cfg(windows)]
 pub mod win_allocator;
@@ -24,6 +25,7 @@ pub use scanner::MemoryScanner;
 #[cfg(unix)]
 pub use allocator::RemoteAllocator;
 pub use elf_parser::{ElfInfo, SectionInfo, SymbolEntry, parse_elf, find_symbol, find_section};
+pub use pe_parser::{PeParser, PeSymbol, PeModuleInfo};
 
 #[cfg(windows)]
 pub use win_allocator::WinRemoteAllocator;

@@ -24,6 +24,7 @@ pub mod anti_detect;
 pub mod communication;
 pub mod mcp;
 pub mod ai_learning;
+pub mod webui;
 pub mod esp_analyzer;
 
 // 顶层 Result 类型别名，简化返回值书写

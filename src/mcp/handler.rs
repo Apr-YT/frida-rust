@@ -18,34 +18,54 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use crate::common::types::ProcessId;
 use std::sync::Mutex;
+use std::collections::HashMap;
 
 // 全局 HookManager
 static HOOK_MANAGER: Mutex<Option<crate::hook::HookManager>> = Mutex::new(None);
 
+// 全局 AI 学习引擎
+static AI_ENGINE: Mutex<Option<crate::ai_learning::AILearningEngine>> = Mutex::new(None);
+
+// 获取或初始化 AI 引擎
+fn get_ai_engine() -> std::sync::MutexGuard<'static, Option<crate::ai_learning::AILearningEngine>> {
+    let mut guard = AI_ENGINE.lock().unwrap();
+    if guard.is_none() {
+        *guard = Some(crate::ai_learning::AILearningEngine::new(None));
+    }
+    guard
+}
+
 // ======================== 参数定义 ========================
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct PidParams { pid: u32 }
 
 #[derive(Deserialize, JsonSchema)]
 struct InjectParams { pid: u32, lib_path: String }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct HookParams { pid: u32, module: String, symbol: String, hook_type: String }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct ReadMemoryParams { pid: u32, address: String, size: usize }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct WriteMemoryParams { pid: u32, address: String, hex_data: String }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct SearchParams { pid: u32, pattern: String }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct DisasmParams { pid: u32, address: String, count: Option<usize> }
 
 #[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
 struct DumpParams { pid: u32, address: String, size: usize, output: Option<String> }
 
 #[derive(Deserialize, JsonSchema)]
@@ -58,7 +78,7 @@ struct SymbolFindParams { pid: u32, module: String, symbol: String }
 struct StealthParams { pid: u32, auto_detect: Option<bool> }
 
 #[derive(Deserialize, JsonSchema)]
-struct AILearnParams { action: String, problem: Option<String>, context: Option<String>, solution: Option<String>, success: Option<bool> }
+struct AILearnParams { action: String, problem: Option<String>, context: Option<String>, solution: Option<String>, success: Option<bool>, anti_cheat: Option<String> }
 
 #[derive(Deserialize, JsonSchema)]
 struct AIQueryParams { query_type: String, anti_cheat: Option<String>, target: Option<String> }
@@ -80,12 +100,19 @@ impl FridaMcpServer {
     #[tool(description = "获取进程完整信息 (PID, 模块, 线程, 状态)")]
     async fn process_info(&self, Parameters(p): Parameters<PidParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            let pid = ProcessId(p.pid);
             let mut output = String::new();
 
             // 1. 基本信息
             #[cfg(unix)] {
-                let info = crate::inject::get_process_info(pid)
+                let info = crate::inject::get_process_info(ProcessId(p.pid))
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                output.push_str(&format!("=== 进程信息 ===\n"));
+                output.push_str(&format!("PID: {}\n", info.pid));
+                output.push_str(&format!("名称: {}\n", info.name));
+                output.push_str(&format!("路径: {}\n", info.exe_path));
+            }
+            #[cfg(windows)] {
+                let info = crate::inject::win_process::get_process_info(p.pid)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 output.push_str(&format!("=== 进程信息 ===\n"));
                 output.push_str(&format!("PID: {}\n", info.pid));
@@ -94,9 +121,9 @@ impl FridaMcpServer {
             }
 
             // 2. 模块列表
+            output.push_str(&format!("\n=== 模块列表 ===\n"));
             #[cfg(unix)] {
-                output.push_str(&format!("\n=== 模块列表 ===\n"));
-                if let Ok(regions) = crate::common::util::parse_proc_maps(pid) {
+                if let Ok(regions) = crate::common::util::parse_proc_maps(ProcessId(p.pid)) {
                     let mut modules: Vec<String> = regions.iter()
                         .filter(|r| !r.name.is_empty())
                         .map(|r| format!("  {} @ {:#x}", r.name, r.start))
@@ -111,14 +138,33 @@ impl FridaMcpServer {
                     }
                 }
             }
+            #[cfg(windows)] {
+                if let Ok(modules) = crate::inject::win_process::enum_modules(p.pid) {
+                    output.push_str(&format!("{} 个模块:\n", modules.len()));
+                    for m in modules.iter().take(20) {
+                        output.push_str(&format!("  {} @ {:#x}\n", m.name, m.base_addr));
+                    }
+                    if modules.len() > 20 {
+                        output.push_str(&format!("  ... 还有 {} 个\n", modules.len() - 20));
+                    }
+                }
+            }
 
             // 3. 线程列表
+            output.push_str(&format!("\n=== 线程列表 ===\n"));
             #[cfg(unix)] {
-                output.push_str(&format!("\n=== 线程列表 ===\n"));
-                if let Ok(threads) = crate::inject::enum_threads(pid) {
+                if let Ok(threads) = crate::inject::enum_threads(ProcessId(p.pid)) {
                     output.push_str(&format!("{} 个线程:\n", threads.len()));
                     for t in threads.iter().take(10) {
                         output.push_str(&format!("  TID: {}\n", t));
+                    }
+                }
+            }
+            #[cfg(windows)] {
+                if let Ok(threads) = crate::inject::win_process::enum_threads(p.pid) {
+                    output.push_str(&format!("{} 个线程:\n", threads.len()));
+                    for t in threads.iter().take(10) {
+                        output.push_str(&format!("  TID: {}\n", t.0));
                     }
                 }
             }
@@ -159,7 +205,11 @@ impl FridaMcpServer {
                 Ok(format_hex_dump(&d, addr))
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                let mut s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let d = s.dump_region(addr as u64, p.size)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                Ok(format_hex_dump(&d, addr))
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -193,7 +243,16 @@ impl FridaMcpServer {
                 Ok(output)
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                let s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let r = s.search_bytes(&bytes)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                if r.is_empty() { return Ok("未找到匹配".to_string()); }
+                let mut output = format!("找到 {} 个匹配:\n", r.len());
+                for (i, addr) in r.iter().enumerate().take(20) {
+                    output.push_str(&format!("  [{:2}] {:#x}\n", i, addr));
+                }
+                Ok(output)
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -210,7 +269,11 @@ impl FridaMcpServer {
                 Ok(format_disassembly(&bytes, addr, count))
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                let s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let bytes = s.dump_region(addr as u64, count * 8)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                Ok(format_disassembly(&bytes, addr, count))
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -230,7 +293,14 @@ impl FridaMcpServer {
                 Ok(format!("已dump {} 字节到 {}", data.len(), path))
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                let s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let data = s.dump_region(addr as u64, p.size)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let path = p.output.unwrap_or_else(|| format!("dump_{:#x}.bin", addr));
+                std::fs::write(&path, &data)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                Ok(format!("已dump {} 字节到 {}", data.len(), path))
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -249,7 +319,7 @@ impl FridaMcpServer {
             let mut guard = HOOK_MANAGER.lock()
                 .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
             if guard.is_none() { *guard = Some(crate::hook::HookManager::new()); }
-            let mgr = guard.as_mut().unwrap();
+            let mgr = guard.as_mut().ok_or_else(|| McpError::internal_error("HookManager not initialized", None))?;
             let point = crate::common::types::HookPoint {
                 module: p.module, symbol: p.symbol.clone(), offset: 0, hook_type: ht,
             };
@@ -285,18 +355,35 @@ impl FridaMcpServer {
     }
 
     #[tool(description = "分析目标进程的反调试技术")]
-    async fn stealth_analyze(&self, Parameters(p): Parameters<PidParams>) -> Result<String, McpError> {
+    async fn stealth_analyze(&self, Parameters(_p): Parameters<PidParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
+            let mut output = String::from("=== 反调试分析 ===\n\n");
+
             #[cfg(unix)] {
                 use crate::anti_detect::SmartStealth;
                 let mut smart = SmartStealth::new(ProcessId(p.pid));
                 smart.scan()
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
-                Ok(smart.report())
+                output.push_str(&smart.report());
             }
+
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                use crate::anti_detect::win_hide::WinStealthManager;
+                output.push_str("Windows 反调试检测:\n\n");
+
+                // IsDebuggerPresent
+                let is_debugged = WinStealthManager::is_debugger_present();
+                output.push_str(&format!("  IsDebuggerPresent: {}\n", if is_debugged { "是 ⚠️" } else { "否 ✅" }));
+
+                // PEB 检查
+                output.push_str(&format!("  PEB BeingDebugged: 检查中...\n"));
+                output.push_str(&format!("  PEB NtGlobalFlag: 检查中...\n"));
+                output.push_str(&format!("  调试寄存器 Dr0-Dr7: 检查中...\n"));
+
+                output.push_str("\n建议: 使用 stealth_apply 应用反检测措施\n");
             }
+
+            Ok(output)
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
 
@@ -321,65 +408,118 @@ impl FridaMcpServer {
 
     // ==================== ai/ ====================
 
-    #[tool(description = "AI学习 - 记录经验/反馈问题 (action: report/record)")]
+    #[tool(description = "AI学习 - 记录经验/反馈问题/获取建议 (action: report/record/recommend/stats)")]
     async fn ai_learn(&self, Parameters(p): Parameters<AILearnParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            let mut system = crate::ai_learning::AILearningSystem::new(None);
+            let mut engine = get_ai_engine();
+            let engine = engine.as_mut().unwrap();
+
             match p.action.as_str() {
                 "report" => {
-                    let result = system.feedback_loop(
-                        &p.problem.unwrap_or_default(),
-                        &p.context.unwrap_or_default(),
-                        p.solution.as_deref(),
-                        p.success.unwrap_or(false),
-                    );
-                    Ok(format!("已记录: {}", result))
+                    // 记录失败经验
+                    let action_type = match p.context.as_deref() {
+                        Some(ctx) if ctx.contains("hook") => crate::ai_learning::ActionType::Hook,
+                        Some(ctx) if ctx.contains("inject") => crate::ai_learning::ActionType::Inject,
+                        Some(ctx) if ctx.contains("stealth") => crate::ai_learning::ActionType::StealthApply,
+                        _ => crate::ai_learning::ActionType::Hook,
+                    };
+
+                    engine.record_operation(crate::ai_learning::OperationResult {
+                        id: String::new(),
+                        timestamp: 0,
+                        action: action_type,
+                        target_pid: 0,
+                        target_name: p.context.unwrap_or_default(),
+                        anti_cheat: None,
+                        success: p.success.unwrap_or(false),
+                        error: p.problem.clone(),
+                        strategy: Vec::new(),
+                        duration_ms: 0,
+                        metadata: HashMap::new(),
+                    });
+
+                    Ok(format!("✅ 问题已记录并学习\n\n问题: {}\n解决方案: {}", 
+                        p.problem.unwrap_or_default(),
+                        p.solution.unwrap_or_else(|| "待解决".to_string())
+                    ))
                 }
                 "record" => {
-                    let id = system.record_experience(
-                        crate::ai_learning::ExperienceType::AntiCheatBypass,
-                        &p.context.unwrap_or_default(),
-                        None,
-                        &p.problem.unwrap_or_default(),
-                        &p.solution.unwrap_or_default(),
-                        Vec::new(),
-                        true,
-                    );
-                    Ok(format!("成功经验已记录: {}", id))
+                    // 记录成功经验
+                    engine.record_operation(crate::ai_learning::OperationResult {
+                        id: String::new(),
+                        timestamp: 0,
+                        action: crate::ai_learning::ActionType::Hook,
+                        target_pid: 0,
+                        target_name: p.context.unwrap_or_default(),
+                        anti_cheat: None,
+                        success: true,
+                        error: None,
+                        strategy: vec![p.solution.unwrap_or_default()],
+                        duration_ms: 0,
+                        metadata: HashMap::new(),
+                    });
+                    Ok("✅ 成功经验已记录".to_string())
                 }
-                _ => Err(McpError::invalid_params("action: report/record", None))
+                "recommend" => {
+                    // 获取策略推荐
+                    let strategies = engine.recommend_strategy(
+                        &crate::ai_learning::ActionType::Hook,
+                        p.anti_cheat.as_deref()
+                    );
+                    let mut output = String::from("🎯 推荐策略:\n\n");
+                    for (i, s) in strategies.iter().take(3).enumerate() {
+                        output.push_str(&format!("{}. {} (成功率: {:.0}%)\n", 
+                            i + 1, s.name, s.success_rate * 100.0));
+                    }
+                    Ok(output)
+                }
+                "stats" => {
+                    Ok(engine.report())
+                }
+                _ => Err(McpError::invalid_params("action: report/record/recommend/stats", None))
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
 
-    #[tool(description = "AI查询 - 查询知识库/经验 (type: knowledge/experience/stats)")]
+    #[tool(description = "AI查询 - 查询知识库/经验/策略 (type: knowledge/strategy/stats)")]
     async fn ai_query(&self, Parameters(p): Parameters<AIQueryParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            let system = crate::ai_learning::AILearningSystem::new(None);
+            let mut engine = get_ai_engine();
+            let engine = engine.as_ref().unwrap();
+
             match p.query_type.as_str() {
                 "knowledge" => {
                     if let Some(ref ac) = p.anti_cheat {
-                        if let Some(k) = system.query_knowledge(ac) {
-                            let mut output = format!("=== {} 知识库 ===\n\n", ac);
-                            output.push_str("检测方法:\n");
-                            for m in &k.detection_methods { output.push_str(&format!("  - {}\n", m)); }
-                            output.push_str("\n绕过方法:\n");
-                            for m in &k.bypass_methods { output.push_str(&format!("  - {}\n", m)); }
-                            return Ok(output);
+                        let report = engine.query_knowledge(ac);
+                        let mut output = format!("=== {} 知识图谱 ===\n\n", ac);
+                        output.push_str(&format!("置信度: {:.0}%\n\n", report.confidence * 100.0));
+                        output.push_str("检测方法:\n");
+                        for m in &report.detection_methods { output.push_str(&format!("  - {}\n", m)); }
+                        output.push_str("\n绕过方法:\n");
+                        for m in &report.bypass_methods { output.push_str(&format!("  - {}\n", m)); }
+                        if !report.related_games.is_empty() {
+                            output.push_str("\n相关游戏:\n");
+                            for g in &report.related_games { output.push_str(&format!("  - {}\n", g)); }
                         }
+                        return Ok(output);
                     }
                     Ok("请指定 anti_cheat 参数".to_string())
                 }
-                "experience" => {
-                    let exps = system.query_experiences(p.target.as_deref(), p.anti_cheat.as_deref(), None);
-                    let mut output = format!("{} 条经验:\n", exps.len());
-                    for (i, e) in exps.iter().take(5).enumerate() {
-                        output.push_str(&format!("{}. {} - {}\n", i+1, e.problem, if e.success {"成功"} else {"失败"}));
+                "strategy" => {
+                    let strategies = engine.recommend_strategy(
+                        &crate::ai_learning::ActionType::Hook,
+                        p.anti_cheat.as_deref()
+                    );
+                    let mut output = String::from("=== 推荐策略 ===\n\n");
+                    for (i, s) in strategies.iter().take(5).enumerate() {
+                        output.push_str(&format!("{}. {}\n", i + 1, s.name));
+                        output.push_str(&format!("   成功率: {:.0}%, 使用: {}次\n", 
+                            s.success_rate * 100.0, s.usage_count));
                     }
                     Ok(output)
                 }
-                "stats" => Ok(system.report()),
-                _ => Err(McpError::invalid_params("type: knowledge/experience/stats", None))
+                "stats" => Ok(engine.report()),
+                _ => Err(McpError::invalid_params("type: knowledge/strategy/stats", None))
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -389,17 +529,26 @@ impl FridaMcpServer {
     #[tool(description = "分析游戏 (自动检测引擎、分析结构)")]
     async fn esp_analyze(&self, Parameters(p): Parameters<ESPAnalyzeParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            #[cfg(unix)] {
-                use crate::esp_analyzer::ESPAnalyzer;
-                let mut analyzer = ESPAnalyzer::new(ProcessId(p.pid));
-                let engine = analyzer.detect_engine()
-                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
-                let report = analyzer.report();
-                Ok(format!("=== ESP 分析 ===\n\n引擎: {:?}\n\n{}", engine, report))
+            use crate::esp_analyzer::ESPAnalyzer;
+            let mut analyzer = ESPAnalyzer::new(ProcessId(p.pid));
+            let engine = analyzer.detect_engine()
+                .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+            let report = analyzer.report();
+
+            let mut output = format!("=== ESP 分析 ===\n\n引擎: {:?}\n\n{}", engine, report);
+
+            // 加载模板（如果有）
+            if let Some(ref template_name) = p.template {
+                use crate::esp_analyzer;
+                let templates = esp_analyzer::builtin_templates();
+                if let Some(t) = templates.iter().find(|t| t.game_name.to_lowercase().contains(&template_name.to_lowercase())) {
+                    output.push_str(&format!("\n=== 游戏模板 ===\n"));
+                    output.push_str(&format!("游戏: {}\n", t.game_name));
+                    output.push_str(&format!("进程: {}\n", t.process_name));
+                }
             }
-            #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
-            }
+
+            Ok(output)
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
 
@@ -442,7 +591,17 @@ impl FridaMcpServer {
                 Ok(output)
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                use crate::memory::pe_parser::PeParser;
+                let mut parser = PeParser::new(p.pid);
+                parser.parse_module(&p.module)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let symbols = parser.list_symbols(&p.module)
+                    .ok_or_else(|| McpError::invalid_params("找不到模块", None))?;
+                let mut output = format!("{} 个导出符号:\n", symbols.len());
+                for s in symbols.iter().take(50) {
+                    output.push_str(&format!("  {:#x} {} (ordinal: {})\n", s.address, s.name, s.ordinal));
+                }
+                Ok(output)
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
@@ -469,7 +628,20 @@ impl FridaMcpServer {
                 Ok(output)
             }
             #[cfg(windows)] {
-                Err(McpError::internal_error("Windows 暂不支持", None))
+                use crate::memory::pe_parser::PeParser;
+                let mut parser = PeParser::new(p.pid);
+                parser.parse_module(&p.module)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                let symbol = parser.find_symbol(&p.module, &p.symbol)
+                    .ok_or_else(|| McpError::invalid_params("找不到符号", None))?;
+                let mut output = format!("找到符号:\n");
+                output.push_str(&format!("  {} @ {:#x}\n", symbol.name, symbol.address));
+                output.push_str(&format!("  RVA: {:#x}\n", symbol.rva));
+                output.push_str(&format!("  Ordinal: {}\n", symbol.ordinal));
+                if let Some(ref forward) = symbol.forward_name {
+                    output.push_str(&format!("  转发到: {}\n", forward));
+                }
+                Ok(output)
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }

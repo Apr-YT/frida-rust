@@ -218,6 +218,7 @@ pub enum TraversalType {
 // ======================== ESP 分析器 ========================
 
 /// ESP 绘制分析器
+#[allow(dead_code)]
 pub struct ESPAnalyzer {
     pid: ProcessId,
     template: Option<GameTemplate>,
@@ -258,53 +259,72 @@ impl ESPAnalyzer {
     }
 
     /// 分析游戏引擎类型
-    #[cfg(unix)]
     pub fn detect_engine(&mut self) -> Result<GameEngine> {
-        use crate::common::util::parse_proc_maps;
-        
-        let regions = parse_proc_maps(self.pid)?;
         let mut engine = GameEngine::Unknown;
         
         // 通过模块名检测引擎
-        for region in &regions {
-            let name_lower = region.name.to_lowercase();
-            
-            if name_lower.contains("unreal") || name_lower.contains("ue4") || name_lower.contains("ue5") {
-                engine = GameEngine::UnrealEngine;
-                break;
-            } else if name_lower.contains("unity") || name_lower.contains("mono") {
-                engine = GameEngine::Unity;
-                break;
-            } else if name_lower.contains("engine") && (name_lower.contains("source") || name_lower.contains("vphysics")) {
-                engine = GameEngine::Source;
-                break;
-            } else if name_lower.contains("frostbite") {
-                engine = GameEngine::Frostbite;
-                break;
-            } else if name_lower.contains("idtech") || name_lower.contains("doom") {
-                engine = GameEngine::IdTech;
-                break;
-            } else if name_lower.contains("cryengine") || name_lower.contains("cry") {
-                engine = GameEngine::CryEngine;
-                break;
+        #[cfg(unix)]
+        {
+            use crate::common::util::parse_proc_maps;
+            if let Ok(regions) = parse_proc_maps(self.pid) {
+                for region in &regions {
+                    let name_lower = region.name.to_lowercase();
+                    
+                    if name_lower.contains("unreal") || name_lower.contains("ue4") || name_lower.contains("ue5") {
+                        engine = GameEngine::UnrealEngine;
+                        break;
+                    } else if name_lower.contains("unity") || name_lower.contains("mono") {
+                        engine = GameEngine::Unity;
+                        break;
+                    } else if name_lower.contains("source") || name_lower.contains("vphysics") {
+                        engine = GameEngine::Source;
+                        break;
+                    } else if name_lower.contains("frostbite") {
+                        engine = GameEngine::Frostbite;
+                        break;
+                    } else if name_lower.contains("idtech") {
+                        engine = GameEngine::IdTech;
+                        break;
+                    } else if name_lower.contains("cryengine") {
+                        engine = GameEngine::CryEngine;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        #[cfg(windows)]
+        {
+            use crate::inject::win_process;
+            if let Ok(modules) = win_process::enum_modules(self.pid.0) {
+                for m in &modules {
+                    let name_lower = m.name.to_lowercase();
+                    if name_lower.contains("unreal") || name_lower.contains("ue4") {
+                        engine = GameEngine::UnrealEngine;
+                        break;
+                    } else if name_lower.contains("unity") || name_lower.contains("mono") {
+                        engine = GameEngine::Unity;
+                        break;
+                    }
+                }
             }
         }
         
         // 通过特征字符串进一步确认
         if engine == GameEngine::Unknown {
-            use crate::memory::MemoryScanner;
-            let mut scanner = MemoryScanner::new(self.pid);
-            
-            // Unreal Engine 特征
-            if let Ok(addrs) = scanner.search_bytes(b"UE4", None) {
-                if !addrs.is_empty() {
-                    engine = GameEngine::UnrealEngine;
-                }
-            }
-            // Unity 特征
-            else if let Ok(addrs) = scanner.search_bytes(b"UnityEngine", None) {
-                if !addrs.is_empty() {
-                    engine = GameEngine::Unity;
+            #[cfg(unix)]
+            {
+                use crate::memory::MemoryScanner;
+                let mut scanner = MemoryScanner::new(self.pid);
+                
+                if let Ok(addrs) = scanner.search_bytes(b"UE4", None) {
+                    if !addrs.is_empty() {
+                        engine = GameEngine::UnrealEngine;
+                    }
+                } else if let Ok(addrs) = scanner.search_bytes(b"UnityEngine", None) {
+                    if !addrs.is_empty() {
+                        engine = GameEngine::Unity;
+                    }
                 }
             }
         }

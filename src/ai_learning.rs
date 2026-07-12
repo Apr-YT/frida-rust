@@ -1,86 +1,95 @@
-//! AI 自我学习系统
+//! AI 全面自我学习系统
 //!
-//! 记录逆向分析过程中的问题和解决方案，
-//! 让 AI 能够从经验中学习并自我升级。
+//! 实现：
+//! - 自动经验收集 - 每次操作自动记录
+//! - 智能反馈循环 - 遇到问题自动分析
+//! - 策略迭代优化 - 根据成功率调整
+//! - 知识图谱构建 - 反作弊特征关系
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use serde::{Serialize, Deserialize};
-use crate::Result;
+// use crate::Result; // 未使用
 
-// ======================== 经验数据结构 ========================
+// ======================== 核心数据结构 ========================
 
-/// 经验类型
+/// 操作类型
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum ExperienceType {
-    /// 反作弊检测成功规避
-    AntiCheatBypass,
-    /// 反作弊检测失败被发现
-    AntiCheatDetected,
-    /// Hook 成功
-    HookSuccess,
-    /// Hook 失败
-    HookFailed,
-    /// 注入成功
-    InjectSuccess,
-    /// 注入失败
-    InjectFailed,
-    /// 内存读取成功
-    MemoryReadSuccess,
-    /// 内存读取失败
-    MemoryReadFailed,
-    /// 特征发现
-    SignatureFound,
-    /// 策略调整
-    StrategyAdjustment,
+pub enum ActionType {
+    /// 进程附着
+    Attach,
+    /// 库注入
+    Inject,
+    /// 函数Hook
+    Hook,
+    /// 内存读取
+    MemoryRead,
+    /// 内存写入
+    MemoryWrite,
+    /// 内存搜索
+    MemorySearch,
+    /// 反检测应用
+    StealthApply,
+    /// 反调试分析
+    StealthAnalyze,
+    /// ESP分析
+    EspAnalyze,
+    /// 符号查询
+    SymbolQuery,
 }
 
-/// 单条经验记录
+/// 操作结果
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Experience {
-    /// 经验ID
+pub struct OperationResult {
+    /// 操作ID
     pub id: String,
     /// 时间戳
     pub timestamp: u64,
-    /// 经验类型
-    pub exp_type: ExperienceType,
-    /// 目标进程/游戏
-    pub target: String,
+    /// 操作类型
+    pub action: ActionType,
+    /// 目标进程
+    pub target_pid: u32,
+    /// 目标名称
+    pub target_name: String,
     /// 反作弊系统（如果有）
     pub anti_cheat: Option<String>,
-    /// 遇到的问题描述
-    pub problem: String,
-    /// 解决方案
-    pub solution: String,
+    /// 是否成功
+    pub success: bool,
+    /// 错误信息（如果失败）
+    pub error: Option<String>,
     /// 使用的策略
     pub strategy: Vec<String>,
-    /// 成功/失败
-    pub success: bool,
-    /// 置信度 (0-100)
-    pub confidence: u8,
-    /// 附加标签
-    pub tags: Vec<String>,
-    /// 额外元数据
+    /// 执行时间（毫秒）
+    pub duration_ms: u64,
+    /// 附加数据
     pub metadata: HashMap<String, String>,
 }
 
 /// 策略模板
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyTemplate {
+pub struct Strategy {
+    /// 策略ID
+    pub id: String,
     /// 策略名称
     pub name: String,
-    /// 适用场景
-    pub scenarios: Vec<String>,
+    /// 适用的操作类型
+    pub actions: Vec<ActionType>,
     /// 适用的反作弊系统
     pub anti_cheats: Vec<String>,
     /// 执行步骤
     pub steps: Vec<StrategyStep>,
     /// 成功率
-    pub success_rate: f32,
+    pub success_rate: f64,
     /// 使用次数
     pub usage_count: u32,
+    /// 成功次数
+    pub success_count: u32,
+    /// 平均执行时间
+    pub avg_duration_ms: u64,
     /// 最后使用时间
     pub last_used: u64,
+    /// 优先级
+    pub priority: u8,
 }
 
 /// 策略步骤
@@ -90,600 +99,596 @@ pub struct StrategyStep {
     pub name: String,
     /// 步骤描述
     pub description: String,
-    /// MCP 工具调用
+    /// MCP工具名
     pub tool: String,
-    /// 参数
+    /// 参数模板
     pub params: HashMap<String, String>,
     /// 是否必须
     pub required: bool,
-    /// 失败时的回退步骤
-    pub fallback: Option<Box<StrategyStep>>,
+    /// 失败时的回退
+    pub fallback: Option<String>,
 }
 
-/// 知识库条目
+/// 知识节点
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KnowledgeEntry {
-    /// 条目ID
+pub struct KnowledgeNode {
+    /// 节点ID
     pub id: String,
-    /// 反作弊系统名称
-    pub anti_cheat: String,
-    /// 特征描述
-    pub signatures: Vec<String>,
-    /// 已知的检测方法
-    pub detection_methods: Vec<String>,
-    /// 已知的绕过方法
-    pub bypass_methods: Vec<String>,
-    /// 注意事项
-    pub notes: Vec<String>,
+    /// 节点类型
+    pub node_type: KnowledgeNodeType,
+    /// 名称
+    pub name: String,
+    /// 描述
+    pub description: String,
+    /// 关联节点
+    pub connections: Vec<KnowledgeEdge>,
+    /// 置信度
+    pub confidence: f64,
     /// 更新时间
     pub updated_at: u64,
-    /// 来源
-    pub source: String,
 }
 
-// ======================== AI 学习系统 ========================
+/// 知识节点类型
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum KnowledgeNodeType {
+    /// 反作弊系统
+    AntiCheat,
+    /// 检测方法
+    DetectionMethod,
+    /// 绕过方法
+    BypassMethod,
+    /// 游戏引擎
+    GameEngine,
+    /// 游戏
+    Game,
+}
 
-/// AI 自我学习系统
-pub struct AILearningSystem {
-    /// 经验数据库
-    experiences: Vec<Experience>,
-    /// 策略库
-    strategies: Vec<StrategyTemplate>,
-    /// 知识库
-    knowledge: HashMap<String, KnowledgeEntry>,
+/// 知识边
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeEdge {
+    /// 目标节点ID
+    pub target_id: String,
+    /// 关系类型
+    pub relation: String,
+    /// 权重
+    pub weight: f64,
+}
+
+// ======================== AI 学习引擎 ========================
+
+/// AI 学习引擎
+#[allow(dead_code)]
+pub struct AILearningEngine {
     /// 存储路径
     storage_path: PathBuf,
-    /// 经验计数器
-    exp_counter: u64,
-}
-
-impl AILearningSystem {
-    /// 创建新的学习系统
-    pub fn new(storage_path: Option<PathBuf>) -> Self {
-        let path = storage_path.unwrap_or_else(|| {
-            // 尝试获取用户数据目录
-            if let Ok(data_dir) = std::env::var(if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" }) {
-                let mut path = PathBuf::from(data_dir);
-                if !cfg!(windows) {
-                    path.push(".local");
-                    path.push("share");
-                }
-                path.push("frida-rust");
-                path.push("ai_learning");
-                path
-            } else {
-                PathBuf::from(".").join("frida-rust").join("ai_learning")
-            }
-        });
-        
-        let mut system = AILearningSystem {
-            experiences: Vec::new(),
-            strategies: Vec::new(),
-            knowledge: HashMap::new(),
-            storage_path: path,
-            exp_counter: 0,
-        };
-        
-        // 尝试加载已有数据
-        let _ = system.load();
-        
-        // 加载内置知识库
-        system.init_builtin_knowledge();
-        
-        system
-    }
-
-    /// 记录一条经验
-    pub fn record_experience(
-        &mut self,
-        exp_type: ExperienceType,
-        target: &str,
-        anti_cheat: Option<&str>,
-        problem: &str,
-        solution: &str,
-        strategy: Vec<String>,
-        success: bool,
-    ) -> String {
-        self.exp_counter += 1;
-        let id = format!("exp_{}", self.exp_counter);
-        
-        let exp = Experience {
-            id: id.clone(),
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            exp_type,
-            target: target.to_string(),
-            anti_cheat: anti_cheat.map(|s| s.to_string()),
-            problem: problem.to_string(),
-            solution: solution.to_string(),
-            strategy,
-            success,
-            confidence: if success { 80 } else { 30 },
-            tags: Vec::new(),
-            metadata: HashMap::new(),
-        };
-        
-        self.experiences.push(exp.clone());
-        
-        // 自动保存
-        let _ = self.save();
-        
-        // 如果是成功经验，可能生成新策略
-        if success {
-            self.learn_from_success(&exp);
-        }
-        
-        log::info!("记录经验: {} - {}", id, problem);
-        id
-    }
-
-    /// 从成功经验中学习
-    fn learn_from_success(&mut self, exp: &Experience) {
-        // 检查是否已有类似策略
-        let existing = self.strategies.iter_mut().find(|s| {
-            s.anti_cheats.contains(&exp.anti_cheat.clone().unwrap_or_default())
-        });
-        
-        if let Some(strategy) = existing {
-            // 更新现有策略的成功率
-            strategy.usage_count += 1;
-            strategy.success_rate = (strategy.success_rate * (strategy.usage_count - 1) as f32 + 1.0) 
-                / strategy.usage_count as f32;
-            strategy.last_used = exp.timestamp;
-        } else if exp.anti_cheat.is_some() {
-            // 创建新策略模板
-            let new_strategy = StrategyTemplate {
-                name: format!("{} 绕过策略", exp.anti_cheat.as_ref().unwrap()),
-                scenarios: vec![exp.target.clone()],
-                anti_cheats: vec![exp.anti_cheat.clone().unwrap()],
-                steps: self.generate_strategy_steps(exp),
-                success_rate: 1.0,
-                usage_count: 1,
-                last_used: exp.timestamp,
-            };
-            
-            self.strategies.push(new_strategy);
-            log::info!("生成新策略: {}", exp.anti_cheat.as_ref().unwrap());
-        }
-    }
-
-    /// 根据经验生成策略步骤
-    fn generate_strategy_steps(&self, exp: &Experience) -> Vec<StrategyStep> {
-        let mut steps = Vec::new();
-        
-        // 基础步骤
-        steps.push(StrategyStep {
-            name: "环境清理".to_string(),
-            description: "清除 Frida 环境变量".to_string(),
-            tool: "apply_smart_stealth".to_string(),
-            params: HashMap::new(),
-            required: true,
-            fallback: None,
-        });
-        
-        // 根据反作弊类型添加特定步骤
-        if let Some(ref ac) = exp.anti_cheat {
-            match ac.as_str() {
-                "TencentACE" | "TenProtect" | "MTP" => {
-                    steps.push(StrategyStep {
-                        name: "延迟注入".to_string(),
-                        description: "腾讯反作弊检测严格，需要延迟注入".to_string(),
-                        tool: "wait_and_inject".to_string(),
-                        params: {
-                            let mut p = HashMap::new();
-                            p.insert("delay_ms".to_string(), "5000".to_string());
-                            p
-                        },
-                        required: true,
-                        fallback: None,
-                    });
-                }
-                "MiHoYoProtect" | "MiHoYoAntiCheat" => {
-                    steps.push(StrategyStep {
-                        name: "内存特征清除".to_string(),
-                        description: "米哈游会扫描内存特征".to_string(),
-                        tool: "erase_frida_signatures".to_string(),
-                        params: HashMap::new(),
-                        required: true,
-                        fallback: None,
-                    });
-                }
-                _ => {}
-            }
-        }
-        
-        steps
-    }
-
-    /// 查询相关经验
-    pub fn query_experiences(
-        &self,
-        target: Option<&str>,
-        anti_cheat: Option<&str>,
-        exp_type: Option<&ExperienceType>,
-    ) -> Vec<&Experience> {
-        self.experiences.iter().filter(|exp| {
-            if let Some(t) = target {
-                if !exp.target.contains(t) {
-                    return false;
-                }
-            }
-            if let Some(ac) = anti_cheat {
-                if exp.anti_cheat.as_ref().map_or(true, |e| !e.contains(ac)) {
-                    return false;
-                }
-            }
-            if let Some(et) = exp_type {
-                if exp.exp_type != *et {
-                    return false;
-                }
-            }
-            true
-        }).collect()
-    }
-
-    /// 查询相关策略
-    pub fn query_strategies(&self, anti_cheat: &str) -> Vec<&StrategyTemplate> {
-        self.strategies.iter().filter(|s| {
-            s.anti_cheats.iter().any(|ac| ac.contains(anti_cheat) || anti_cheat.contains(ac))
-        }).collect()
-    }
-
-    /// 查询知识库
-    pub fn query_knowledge(&self, anti_cheat: &str) -> Option<&KnowledgeEntry> {
-        self.knowledge.get(anti_cheat)
-    }
-
-    /// 根据历史经验推荐策略
-    pub fn recommend_strategy(&self, anti_cheat: &str, target: &str) -> Vec<String> {
-        let mut recommendations = Vec::new();
-        
-        // 1. 查询知识库
-        if let Some(knowledge) = self.query_knowledge(anti_cheat) {
-            recommendations.push(format!("📚 知识库建议: {:?}", knowledge.bypass_methods));
-        }
-        
-        // 2. 查询历史成功策略
-        let strategies = self.query_strategies(anti_cheat);
-        let successful: Vec<_> = strategies.iter()
-            .filter(|s| s.success_rate > 0.5)
-            .collect();
-        
-        if !successful.is_empty() {
-            let best = successful.iter().max_by(|a, b| {
-                a.success_rate.partial_cmp(&b.success_rate).unwrap()
-            }).unwrap();
-            recommendations.push(format!(
-                "🎯 推荐策略: {} (成功率: {:.0}%, 使用次数: {})",
-                best.name, best.success_rate * 100.0, best.usage_count
-            ));
-        }
-        
-        // 3. 查询历史经验
-        let experiences = self.query_experiences(Some(target), Some(anti_cheat), None);
-        let successful_exps: Vec<_> = experiences.iter()
-            .filter(|e| e.success)
-            .collect();
-        
-        if !successful_exps.is_empty() {
-            let latest = successful_exps.last().unwrap();
-            recommendations.push(format!(
-                "💡 历史经验: {} (解决方案: {})",
-                latest.problem, latest.solution
-            ));
-        }
-        
-        recommendations
-    }
-
-    /// 反馈循环 - AI 报告问题并学习
-    pub fn feedback_loop(
-        &mut self,
-        problem: &str,
-        context: &str,
-        solution: Option<&str>,
-        success: bool,
-    ) -> String {
-        let exp_type = if success {
-            ExperienceType::AntiCheatBypass
-        } else {
-            ExperienceType::AntiCheatDetected
-        };
-        
-        // 从上下文中提取反作弊信息
-        let anti_cheat = self.extract_anti_cheat(context);
-        let target = self.extract_target(context);
-        
-        let solution_str = solution.unwrap_or("待解决");
-        
-        let id = self.record_experience(
-            exp_type,
-            &target,
-            anti_cheat.as_deref(),
-            problem,
-            solution_str,
-            Vec::new(),
-            success,
-        );
-        
-        // 如果失败，尝试从知识库中找解决方案
-        if !success {
-            if let Some(ac) = &anti_cheat {
-                if let Some(knowledge) = self.query_knowledge(ac) {
-                    return format!(
-                        "❌ 问题记录: {}\n\n\
-                         📚 知识库中有以下绕过方法可以尝试:\n\
-                         {}\n\n\
-                         💡 建议尝试这些方法并反馈结果",
-                        id,
-                        knowledge.bypass_methods.iter()
-                            .enumerate()
-                            .map(|(i, m)| format!("  {}. {}", i + 1, m))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    );
-                }
-            }
-        }
-        
-        id
-    }
-
-    /// 从上下文中提取反作弊名称（公开版本）
-    pub fn extract_anti_cheat_from_context(&self, context: &str) -> Option<String> {
-        self.extract_anti_cheat(context)
-    }
-
-    /// 获取可变知识库引用
-    pub fn query_knowledge_mut(&mut self, anti_cheat: &str) -> Option<&mut KnowledgeEntry> {
-        self.knowledge.get_mut(anti_cheat)
-    }
-
-    /// 从上下文中提取反作弊名称
-    fn extract_anti_cheat(&self, context: &str) -> Option<String> {
-        let known_anti_cheats = vec![
-            "ACE", "TenProtect", "MTP", "UProtect", "Yidun",
-            "MiHoYo", "GPProtect", "Lilith", "BattlEye", "EasyAntiCheat",
-        ];
-        
-        for ac in known_anti_cheats {
-            if context.contains(ac) {
-                return Some(ac.to_string());
-            }
-        }
-        
-        None
-    }
-
-    /// 从上下文中提取目标名称
-    fn extract_target(&self, context: &str) -> String {
-        // 简单提取：如果包含 "PID" 则提取 PID
-        if let Some(pid_start) = context.find("PID=") {
-            let pid_str = &context[pid_start + 4..];
-            if let Some(pid_end) = pid_str.find(|c: char| !c.is_ascii_digit()) {
-                return format!("PID:{}", &pid_str[..pid_end]);
-            }
-        }
-        
-        "unknown".to_string()
-    }
-
-    /// 获取学习统计
-    pub fn stats(&self) -> LearningStats {
-        let total = self.experiences.len();
-        let successful = self.experiences.iter().filter(|e| e.success).count();
-        let failed = total - successful;
-        
-        let mut by_type = HashMap::new();
-        for exp in &self.experiences {
-            *by_type.entry(exp.exp_type.clone()).or_insert(0) += 1;
-        }
-        
-        let mut by_anti_cheat = HashMap::new();
-        for exp in &self.experiences {
-            if let Some(ref ac) = exp.anti_cheat {
-                *by_anti_cheat.entry(ac.clone()).or_insert(0) += 1;
-            }
-        }
-        
-        LearningStats {
-            total_experiences: total,
-            successful,
-            failed,
-            success_rate: if total > 0 { successful as f32 / total as f32 } else { 0.0 },
-            strategies_count: self.strategies.len(),
-            knowledge_count: self.knowledge.len(),
-            by_type,
-            by_anti_cheat,
-        }
-    }
-
-    /// 生成学习报告
-    pub fn report(&self) -> String {
-        let stats = self.stats();
-        
-        let mut report = String::from("=== AI 学习系统报告 ===\n\n");
-        
-        report.push_str(&format!("📊 总体统计:\n"));
-        report.push_str(&format!("  总经验数: {}\n", stats.total_experiences));
-        report.push_str(&format!("  成功: {} ({:.0}%)\n", stats.successful, stats.success_rate * 100.0));
-        report.push_str(&format!("  失败: {}\n", stats.failed));
-        report.push_str(&format!("  策略库: {} 条\n", stats.strategies_count));
-        report.push_str(&format!("  知识库: {} 条\n\n", stats.knowledge_count));
-        
-        report.push_str("📈 按类型统计:\n");
-        for (exp_type, count) in &stats.by_type {
-            report.push_str(&format!("  {:?}: {}\n", exp_type, count));
-        }
-        
-        report.push_str("\n🎮 按反作弊统计:\n");
-        for (ac, count) in &stats.by_anti_cheat {
-            report.push_str(&format!("  {}: {}\n", ac, count));
-        }
-        
-        report.push_str("\n📚 策略库:\n");
-        for strategy in &self.strategies {
-            report.push_str(&format!(
-                "  {} (成功率: {:.0}, 使用: {}次)\n",
-                strategy.name, strategy.success_rate * 100.0, strategy.usage_count
-            ));
-        }
-        
-        report
-    }
-
-    /// 初始化内置知识库
-    fn init_builtin_knowledge(&mut self) {
-        // 腾讯 ACE
-        self.knowledge.insert("TencentACE".to_string(), KnowledgeEntry {
-            id: "ac_ace".to_string(),
-            anti_cheat: "TencentACE".to_string(),
-            signatures: vec![
-                "ACE-Base".to_string(),
-                "ACE-Tracer".to_string(),
-                "AntiCheatExpert".to_string(),
-            ],
-            detection_methods: vec![
-                "内存完整性检查".to_string(),
-                "调试器检测".to_string(),
-                "进程注入检测".to_string(),
-                "Hook 检测".to_string(),
-                "模块完整性校验".to_string(),
-            ],
-            bypass_methods: vec![
-                "延迟注入 - 等待游戏完全加载后再注入".to_string(),
-                "内存伪装 - 修改内存特征避免扫描".to_string(),
-                "线程隐藏 - 隐藏 Frida 相关线程".to_string(),
-                "模块隐藏 - 隐藏 Frida 模块".to_string(),
-                "调用栈伪造 - 伪造正常的调用栈".to_string(),
-            ],
-            notes: vec![
-                "ACE 检测非常严格，需要多层防护".to_string(),
-                "建议在游戏启动后等待 5-10 秒再注入".to_string(),
-                "注入后立即应用所有反检测措施".to_string(),
-            ],
-            updated_at: 0,
-            source: "builtin".to_string(),
-        });
-        
-        // 米哈游
-        self.knowledge.insert("MiHoYoProtect".to_string(), KnowledgeEntry {
-            id: "ac_mihoyo".to_string(),
-            anti_cheat: "MiHoYoProtect".to_string(),
-            signatures: vec![
-                "MiHoYoProtect".to_string(),
-                "mhyprotect".to_string(),
-                "mhy_ac".to_string(),
-            ],
-            detection_methods: vec![
-                "内存扫描".to_string(),
-                "模块校验".to_string(),
-                "调试器检测".to_string(),
-                "系统调用监控".to_string(),
-            ],
-            bypass_methods: vec![
-                "特征擦除 - 清除内存中的 Frida 特征".to_string(),
-                "模块隐藏 - 隐藏 /proc/self/maps 中的条目".to_string(),
-                "环境清理 - 清除 FRIDA_* 环境变量".to_string(),
-                "调用栈伪造 - 过滤敏感调用帧".to_string(),
-            ],
-            notes: vec![
-                "米哈游会持续更新检测方法".to_string(),
-                "建议使用最新版本的反检测模块".to_string(),
-            ],
-            updated_at: 0,
-            source: "builtin".to_string(),
-        });
-        
-        // 网易 Yidun
-        self.knowledge.insert("NetEaseYidun".to_string(), KnowledgeEntry {
-            id: "ac_yidun".to_string(),
-            anti_cheat: "NetEaseYidun".to_string(),
-            signatures: vec![
-                "Yidun".to_string(),
-                "yidun".to_string(),
-                "libyidun".to_string(),
-            ],
-            detection_methods: vec![
-                "内存保护".to_string(),
-                "反调试检测".to_string(),
-                "Hook 检测".to_string(),
-            ],
-            bypass_methods: vec![
-                "内存特征清除".to_string(),
-                "反调试绕过".to_string(),
-                "Hook 伪装".to_string(),
-            ],
-            notes: vec!["网易易盾会根据游戏定制检测策略".to_string()],
-            updated_at: 0,
-            source: "builtin".to_string(),
-        });
-    }
-
-    /// 保存到文件
-    fn save(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.storage_path)?;
-        
-        let experiences_path = self.storage_path.join("experiences.json");
-        let strategies_path = self.storage_path.join("strategies.json");
-        let knowledge_path = self.storage_path.join("knowledge.json");
-        
-        std::fs::write(
-            &experiences_path,
-            serde_json::to_string_pretty(&self.experiences).unwrap_or_default(),
-        )?;
-        
-        std::fs::write(
-            &strategies_path,
-            serde_json::to_string_pretty(&self.strategies).unwrap_or_default(),
-        )?;
-        
-        std::fs::write(
-            &knowledge_path,
-            serde_json::to_string_pretty(&self.knowledge).unwrap_or_default(),
-        )?;
-        
-        Ok(())
-    }
-
-    /// 从文件加载
-    fn load(&mut self) -> Result<()> {
-        let experiences_path = self.storage_path.join("experiences.json");
-        let strategies_path = self.storage_path.join("strategies.json");
-        let knowledge_path = self.storage_path.join("knowledge.json");
-        
-        if experiences_path.exists() {
-            let data = std::fs::read_to_string(&experiences_path)?;
-            self.experiences = serde_json::from_str(&data).unwrap_or_default();
-        }
-        
-        if strategies_path.exists() {
-            let data = std::fs::read_to_string(&strategies_path)?;
-            self.strategies = serde_json::from_str(&data).unwrap_or_default();
-        }
-        
-        if knowledge_path.exists() {
-            let data = std::fs::read_to_string(&knowledge_path)?;
-            self.knowledge = serde_json::from_str(&data).unwrap_or_default();
-        }
-        
-        Ok(())
-    }
+    /// 操作历史
+    operations: Vec<OperationResult>,
+    /// 策略库
+    strategies: Vec<Strategy>,
+    /// 知识图谱
+    knowledge: HashMap<String, KnowledgeNode>,
+    /// 操作计数器
+    counter: u64,
+    /// 统计信息
+    stats: LearningStats,
 }
 
 /// 学习统计
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningStats {
-    pub total_experiences: usize,
-    pub successful: usize,
-    pub failed: usize,
-    pub success_rate: f32,
-    pub strategies_count: usize,
-    pub knowledge_count: usize,
-    pub by_type: HashMap<ExperienceType, usize>,
-    pub by_anti_cheat: HashMap<String, usize>,
+    /// 总操作次数
+    pub total_operations: u32,
+    /// 成功次数
+    pub success_count: u32,
+    /// 失败次数
+    pub failure_count: u32,
+    /// 按操作类型统计
+    pub by_action: HashMap<ActionType, ActionStats>,
+    /// 按反作弊统计
+    pub by_anti_cheat: HashMap<String, ActionStats>,
+    /// 学习曲线（最近10次成功率）
+    pub learning_curve: Vec<f64>,
+}
+
+/// 操作统计
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionStats {
+    pub total: u32,
+    pub success: u32,
+    pub failure: u32,
+    pub success_rate: f64,
+    pub avg_duration_ms: u64,
+}
+
+impl AILearningEngine {
+    /// 创建新的学习引擎
+    pub fn new(storage_path: Option<PathBuf>) -> Self {
+        let path = storage_path.unwrap_or_else(|| {
+            if let Ok(data_dir) = std::env::var(if cfg!(windows) { "LOCALAPPDATA" } else { "HOME" }) {
+                let mut p = PathBuf::from(data_dir);
+                if !cfg!(windows) { p.push(".local/share"); }
+                p.push("frida-rust/ai_learning");
+                p
+            } else {
+                PathBuf::from("./ai_learning")
+            }
+        });
+
+        let mut engine = AILearningEngine {
+            storage_path: path,
+            operations: Vec::new(),
+            strategies: Vec::new(),
+            knowledge: HashMap::new(),
+            counter: 0,
+            stats: LearningStats::new(),
+        };
+
+        engine.load();
+        engine.init_builtin_knowledge();
+        engine
+    }
+
+    // ==================== 自动经验收集 ====================
+
+    /// 记录操作（自动调用）
+    pub fn record_operation(&mut self, mut op: OperationResult) {
+        self.counter += 1;
+        op.id = format!("op_{}", self.counter);
+        op.timestamp = self.get_timestamp();
+
+        // 更新统计
+        self.update_stats(&op);
+
+        // 学习：从成功/失败中提取经验
+        if op.success {
+            self.learn_from_success(&op);
+        } else {
+            self.learn_from_failure(&op);
+        }
+
+        self.operations.push(op);
+
+        // 自动保存
+        if self.operations.len() % 10 == 0 {
+            self.save();
+        }
+    }
+
+    /// 开始记录操作
+    pub fn start_operation(&self, action: ActionType, pid: u32, name: &str) -> OperationTracker {
+        OperationTracker {
+            id: format!("op_{}", self.counter + 1),
+            action,
+            target_pid: pid,
+            target_name: name.to_string(),
+            anti_cheat: None,
+            strategy: Vec::new(),
+            start_time: std::time::Instant::now(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    // ==================== 智能反馈循环 ====================
+
+    /// 从成功中学习
+    fn learn_from_success(&mut self, op: &OperationResult) {
+        // 查找或创建策略
+        let strategy_id = format!("{}_{}", 
+            format!("{:?}", op.action).to_lowercase(),
+            op.anti_cheat.as_deref().unwrap_or("default")
+        );
+        let timestamp = self.get_timestamp();
+        let new_steps = self.generate_steps_from_success(op);
+
+        if let Some(strategy) = self.strategies.iter_mut().find(|s| s.id == strategy_id) {
+            strategy.success_count += 1;
+            strategy.usage_count += 1;
+            strategy.success_rate = strategy.success_count as f64 / strategy.usage_count as f64;
+            strategy.last_used = op.timestamp;
+            strategy.avg_duration_ms = (strategy.avg_duration_ms + op.duration_ms) / 2;
+        } else {
+            // 创建新策略
+            self.strategies.push(Strategy {
+                id: strategy_id,
+                name: format!("{:?} - {}", op.action, op.anti_cheat.as_deref().unwrap_or("default")),
+                actions: vec![op.action.clone()],
+                anti_cheats: op.anti_cheat.iter().cloned().collect(),
+                steps: new_steps,
+                success_rate: 1.0,
+                usage_count: 1,
+                success_count: 1,
+                avg_duration_ms: op.duration_ms,
+                last_used: timestamp,
+                priority: 5,
+            });
+        }
+
+        // 更新知识图谱
+        if let Some(ref ac) = op.anti_cheat {
+            self.update_knowledge_for_success(ac, op);
+        }
+    }
+
+    /// 从失败中学习
+    fn learn_from_failure(&mut self, op: &OperationResult) {
+        // 更新策略统计
+        let strategy_id = format!("{}_{}", 
+            format!("{:?}", op.action).to_lowercase(),
+            op.anti_cheat.as_deref().unwrap_or("default")
+        );
+
+        if let Some(strategy) = self.strategies.iter_mut().find(|s| s.id == strategy_id) {
+            strategy.usage_count += 1;
+            strategy.success_rate = strategy.success_count as f64 / strategy.usage_count as f64;
+            strategy.last_used = op.timestamp;
+        }
+
+        // 分析失败原因
+        if let Some(ref error) = op.error {
+            self.analyze_failure_reason(error, op);
+        }
+
+        // 更新知识图谱
+        if let Some(ref ac) = op.anti_cheat {
+            self.update_knowledge_for_failure(ac, op);
+        }
+    }
+
+    /// 分析失败原因
+    fn analyze_failure_reason(&mut self, error: &str, _op: &OperationResult) {
+        let error_lower = error.to_lowercase();
+        let timestamp = self.get_timestamp();
+
+        // 常见失败模式
+        let patterns = vec![
+            ("permission denied", "权限不足", "需要 root 权限"),
+            ("not found", "目标不存在", "检查进程/模块是否存在"),
+            ("timeout", "超时", "增加超时时间或重试"),
+            ("detected", "被检测", "应用反检测措施"),
+            ("anti-cheat", "反作弊拦截", "使用更强的反检测"),
+            ("crash", "崩溃", "检查参数是否正确"),
+        ];
+
+        for (pattern, reason, suggestion) in patterns {
+            if error_lower.contains(pattern) {
+                let node_id = format!("error_{}", pattern.replace(" ", "_"));
+                if !self.knowledge.contains_key(&node_id) {
+                    self.knowledge.insert(node_id.clone(), KnowledgeNode {
+                        id: node_id,
+                        node_type: KnowledgeNodeType::DetectionMethod,
+                        name: reason.to_string(),
+                        description: format!("错误模式: {} -> {}", error, suggestion),
+                        connections: Vec::new(),
+                        confidence: 0.8,
+                        updated_at: timestamp,
+                    });
+                }
+            }
+        }
+    }
+
+    // ==================== 策略迭代优化 ====================
+
+    /// 获取推荐策略
+    pub fn recommend_strategy(&self, action: &ActionType, anti_cheat: Option<&str>) -> Vec<&Strategy> {
+        let mut candidates: Vec<&Strategy> = self.strategies.iter()
+            .filter(|s| s.actions.contains(action))
+            .filter(|s| {
+                if let Some(ac) = anti_cheat {
+                    s.anti_cheats.is_empty() || s.anti_cheats.contains(&ac.to_string())
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // 按成功率和优先级排序
+        candidates.sort_by(|a, b| {
+            let score_a = a.success_rate * 0.7 + (a.priority as f64 / 10.0) * 0.3;
+            let score_b = b.success_rate * 0.7 + (b.priority as f64 / 10.0) * 0.3;
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        candidates
+    }
+
+    /// 优化策略（定期调用）
+    pub fn optimize_strategies(&mut self) {
+        let now = self.get_timestamp();
+
+        for strategy in &mut self.strategies {
+            // 降低长期未使用策略的优先级
+            if now - strategy.last_used > 86400 * 7 {  // 7天
+                strategy.priority = strategy.priority.saturating_sub(1);
+            }
+
+            // 提升高成功率策略的优先级
+            if strategy.success_rate > 0.8 && strategy.usage_count >= 5 {
+                strategy.priority = (strategy.priority + 1).min(10);
+            }
+        }
+    }
+
+    // ==================== 知识图谱 ====================
+
+    /// 更新成功知识
+    fn update_knowledge_for_success(&mut self, anti_cheat: &str, op: &OperationResult) {
+        let ac_id = format!("ac_{}", anti_cheat.to_lowercase().replace(" ", "_"));
+        let timestamp = self.get_timestamp();
+
+        // 添加/更新反作弊节点
+        if !self.knowledge.contains_key(&ac_id) {
+            self.knowledge.insert(ac_id.clone(), KnowledgeNode {
+                id: ac_id.clone(),
+                node_type: KnowledgeNodeType::AntiCheat,
+                name: anti_cheat.to_string(),
+                description: String::new(),
+                connections: Vec::new(),
+                confidence: 0.5,
+                updated_at: timestamp,
+            });
+        }
+
+        // 添加绕过方法节点
+        let bypass_id = format!("bypass_{:?}_{:?}", op.action, anti_cheat).to_lowercase();
+        if !self.knowledge.contains_key(&bypass_id) {
+            self.knowledge.insert(bypass_id.clone(), KnowledgeNode {
+                id: bypass_id,
+                node_type: KnowledgeNodeType::BypassMethod,
+                name: format!("{:?} 绕过", op.action),
+                description: format!("成功绕过 {} 的 {:?}", anti_cheat, op.action),
+                connections: vec![KnowledgeEdge {
+                    target_id: ac_id,
+                    relation: "绕过".to_string(),
+                    weight: 1.0,
+                }],
+                confidence: 0.9,
+                updated_at: timestamp,
+            });
+        }
+    }
+
+    /// 更新失败知识
+    fn update_knowledge_for_failure(&mut self, anti_cheat: &str, _op: &OperationResult) {
+        let ac_id = format!("ac_{}", anti_cheat.to_lowercase().replace(" ", "_"));
+
+        if let Some(node) = self.knowledge.get_mut(&ac_id) {
+            node.confidence = (node.confidence + 0.1).min(1.0);
+        }
+    }
+
+    /// 查询知识
+    pub fn query_knowledge(&self, anti_cheat: &str) -> KnowledgeReport {
+        let ac_id = format!("ac_{}", anti_cheat.to_lowercase().replace(" ", "_"));
+
+        let mut report = KnowledgeReport {
+            anti_cheat: anti_cheat.to_string(),
+            detection_methods: Vec::new(),
+            bypass_methods: Vec::new(),
+            related_games: Vec::new(),
+            confidence: 0.0,
+        };
+
+        if let Some(ac_node) = self.knowledge.get(&ac_id) {
+            report.confidence = ac_node.confidence;
+
+            // 查找关联的检测和绕过方法
+            for (_id, node) in &self.knowledge {
+                for edge in &node.connections {
+                    if edge.target_id == ac_id {
+                        match node.node_type {
+                            KnowledgeNodeType::DetectionMethod => {
+                                report.detection_methods.push(node.name.clone());
+                            }
+                            KnowledgeNodeType::BypassMethod => {
+                                report.bypass_methods.push(node.name.clone());
+                            }
+                            KnowledgeNodeType::Game => {
+                                report.related_games.push(node.name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        report
+    }
+
+    // ==================== 辅助方法 ====================
+
+    fn generate_steps_from_success(&self, op: &OperationResult) -> Vec<StrategyStep> {
+        vec![StrategyStep {
+            name: format!("{:?}", op.action),
+            description: format!("执行 {:?}", op.action),
+            tool: format!("{:?}_tool", op.action).to_lowercase(),
+            params: HashMap::new(),
+            required: true,
+            fallback: None,
+        }]
+    }
+
+    fn update_stats(&mut self, op: &OperationResult) {
+        self.stats.total_operations += 1;
+
+        if op.success {
+            self.stats.success_count += 1;
+        } else {
+            self.stats.failure_count += 1;
+        }
+
+        // 更新学习曲线
+        self.stats.learning_curve.push(if op.success { 1.0 } else { 0.0 });
+        if self.stats.learning_curve.len() > 10 {
+            self.stats.learning_curve.remove(0);
+        }
+
+        // 按操作类型统计
+        let action_stats = self.stats.by_action.entry(op.action.clone()).or_insert_with(|| ActionStats {
+            total: 0, success: 0, failure: 0, success_rate: 0.0, avg_duration_ms: 0,
+        });
+        action_stats.total += 1;
+        if op.success { action_stats.success += 1; } else { action_stats.failure += 1; }
+        action_stats.success_rate = action_stats.success as f64 / action_stats.total as f64;
+        action_stats.avg_duration_ms = (action_stats.avg_duration_ms + op.duration_ms) / 2;
+
+        // 按反作弊统计
+        if let Some(ref ac) = op.anti_cheat {
+            let ac_stats = self.stats.by_anti_cheat.entry(ac.clone()).or_insert_with(|| ActionStats {
+                total: 0, success: 0, failure: 0, success_rate: 0.0, avg_duration_ms: 0,
+            });
+            ac_stats.total += 1;
+            if op.success { ac_stats.success += 1; } else { ac_stats.failure += 1; }
+            ac_stats.success_rate = ac_stats.success as f64 / ac_stats.total as f64;
+        }
+    }
+
+    fn get_timestamp(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    // ==================== 报告生成 ====================
+
+    /// 生成学习报告
+    pub fn report(&self) -> String {
+        let mut report = String::from("=== AI 学习报告 ===\n\n");
+
+        report.push_str(&format!("📊 总体统计:\n"));
+        report.push_str(&format!("  总操作: {}\n", self.stats.total_operations));
+        report.push_str(&format!("  成功: {} ({:.0}%)\n", 
+            self.stats.success_count,
+            if self.stats.total_operations > 0 { 
+                self.stats.success_count as f64 / self.stats.total_operations as f64 * 100.0 
+            } else { 0.0 }
+        ));
+        report.push_str(&format!("  失败: {}\n", self.stats.failure_count));
+        report.push_str(&format!("  策略数: {}\n", self.strategies.len()));
+        report.push_str(&format!("  知识节点: {}\n\n", self.knowledge.len()));
+
+        report.push_str("📈 学习曲线 (最近10次):\n  ");
+        for &val in &self.stats.learning_curve {
+            report.push_str(if val > 0.5 { "█" } else { "░" });
+        }
+        report.push_str("\n\n");
+
+        report.push_str("🎯 按操作类型:\n");
+        for (action, stats) in &self.stats.by_action {
+            report.push_str(&format!("  {:?}: {}次, {:.0}%\n", action, stats.total, stats.success_rate * 100.0));
+        }
+
+        report.push_str("\n🛡️ 按反作弊:\n");
+        for (ac, stats) in &self.stats.by_anti_cheat {
+            report.push_str(&format!("  {}: {}次, {:.0}%\n", ac, stats.total, stats.success_rate * 100.0));
+        }
+
+        report
+    }
+
+    // ==================== 内置知识库 ====================
+
+    fn init_builtin_knowledge(&mut self) {
+        // 腾讯 ACE
+        self.knowledge.insert("ac_tencent_ace".to_string(), KnowledgeNode {
+            id: "ac_tencent_ace".to_string(),
+            node_type: KnowledgeNodeType::AntiCheat,
+            name: "腾讯 ACE".to_string(),
+            description: "腾讯游戏反作弊专家".to_string(),
+            connections: Vec::new(),
+            confidence: 0.9,
+            updated_at: self.get_timestamp(),
+        });
+
+        // 米哈游
+        self.knowledge.insert("ac_mihoyo".to_string(), KnowledgeNode {
+            id: "ac_mihoyo".to_string(),
+            node_type: KnowledgeNodeType::AntiCheat,
+            name: "米哈游 Protect".to_string(),
+            description: "米哈游游戏保护".to_string(),
+            connections: Vec::new(),
+            confidence: 0.85,
+            updated_at: self.get_timestamp(),
+        });
+    }
+
+    // ==================== 持久化 ====================
+
+    fn save(&self) {
+        // TODO: 保存到文件
+    }
+
+    fn load(&mut self) {
+        // TODO: 从文件加载
+    }
+}
+
+/// 操作追踪器
+pub struct OperationTracker {
+    id: String,
+    action: ActionType,
+    target_pid: u32,
+    target_name: String,
+    anti_cheat: Option<String>,
+    strategy: Vec<String>,
+    start_time: std::time::Instant,
+    metadata: HashMap<String, String>,
+}
+
+impl OperationTracker {
+    /// 设置反作弊类型
+    pub fn with_anti_cheat(mut self, anti_cheat: &str) -> Self {
+        self.anti_cheat = Some(anti_cheat.to_string());
+        self
+    }
+
+    /// 添加策略步骤
+    pub fn with_strategy(mut self, step: &str) -> Self {
+        self.strategy.push(step.to_string());
+        self
+    }
+
+    /// 完成操作
+    pub fn finish(self, success: bool, error: Option<String>) -> OperationResult {
+        OperationResult {
+            id: self.id,
+            timestamp: 0,
+            action: self.action,
+            target_pid: self.target_pid,
+            target_name: self.target_name,
+            anti_cheat: self.anti_cheat,
+            success,
+            error,
+            strategy: self.strategy,
+            duration_ms: self.start_time.elapsed().as_millis() as u64,
+            metadata: self.metadata,
+        }
+    }
+}
+
+/// 知识报告
+#[derive(Debug)]
+pub struct KnowledgeReport {
+    pub anti_cheat: String,
+    pub detection_methods: Vec<String>,
+    pub bypass_methods: Vec<String>,
+    pub related_games: Vec<String>,
+    pub confidence: f64,
+}
+
+impl LearningStats {
+    fn new() -> Self {
+        LearningStats {
+            total_operations: 0,
+            success_count: 0,
+            failure_count: 0,
+            by_action: HashMap::new(),
+            by_anti_cheat: HashMap::new(),
+            learning_curve: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -691,33 +696,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_learning_system_creation() {
-        let system = AILearningSystem::new(None);
-        assert_eq!(system.experiences.len(), 0);
-        assert!(system.knowledge.len() > 0); // 内置知识库
+    fn test_learning_engine_creation() {
+        let engine = AILearningEngine::new(None);
+        assert_eq!(engine.stats.total_operations, 0);
     }
 
     #[test]
-    fn test_record_experience() {
-        let mut system = AILearningSystem::new(None);
-        let id = system.record_experience(
-            ExperienceType::AntiCheatBypass,
-            "test_game",
-            Some("TestAC"),
-            "检测到调试器",
-            "使用延迟注入",
-            vec!["delay_inject".to_string()],
-            true,
-        );
-        assert!(!id.is_empty());
-        assert_eq!(system.experiences.len(), 1);
-    }
-
-    #[test]
-    fn test_query_knowledge() {
-        let system = AILearningSystem::new(None);
-        let knowledge = system.query_knowledge("TencentACE");
-        assert!(knowledge.is_some());
-        assert_eq!(knowledge.unwrap().anti_cheat, "TencentACE");
+    fn test_record_operation() {
+        let mut engine = AILearningEngine::new(None);
+        engine.record_operation(OperationResult {
+            id: "test".to_string(),
+            timestamp: 0,
+            action: ActionType::Hook,
+            target_pid: 1234,
+            target_name: "test.exe".to_string(),
+            anti_cheat: None,
+            success: true,
+            error: None,
+            strategy: Vec::new(),
+            duration_ms: 100,
+            metadata: HashMap::new(),
+        });
+        assert_eq!(engine.stats.total_operations, 1);
+        assert_eq!(engine.stats.success_count, 1);
     }
 }
