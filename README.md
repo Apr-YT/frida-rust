@@ -164,30 +164,78 @@ ai_query_experience(anti_cheat="TencentACE")
 
 `
 src/
-├── main.rs              # CLI 入口
-├── lib.rs               # 库入口
-├── ai_learning.rs       # AI学习系统
-├── esp_analyzer.rs      # ESP分析器
-├── mcp/                 # MCP 服务器
-│   ├── handler.rs       # MCP 工具处理
+├── main.rs                # CLI 入口
+├── lib.rs                 # 库入口
+├── ai_learning.rs         # AI学习系统
+├── esp_analyzer.rs        # ESP分析器
+│
+├── bin/
+│   └── mcp_server.rs      # MCP 服务器入口
+│
+├── mcp/                   # MCP 工具实现
+│   ├── handler.rs         # 36个 MCP 工具
 │   └── mod.rs
-├── hook/                # Hook 模块
-│   ├── inline.rs        # Inline Hook
-│   ├── got_plt.rs       # GOT/PLT Hook
-│   └── java_hook.rs     # Java Hook
-├── inject/              # 注入模块
-│   ├── ptrace_inject.rs # ptrace 注入
-│   └── reflect_inject.rs # 反射注入
-├── memory/              # 内存操作
-│   ├── scanner.rs       # 内存扫描
-│   └── elf_parser.rs    # ELF 解析
-└── anti_detect/         # 反检测模块
-    ├── smart_stealth.rs # 智能反检测
-    ├── port_hide.rs     # 端口隐藏
-    ├── fd_hide.rs       # FD隐藏
-    ├── thread_hide.rs   # 线程隐藏
-    ├── net_hide.rs      # 网络隐藏
-    └── env_clean.rs     # 环境清理
+│
+├── hook/                  # Hook 模块
+│   ├── inline.rs          # Inline Hook (x86_64/ARM64)
+│   ├── got_plt.rs         # GOT/PLT Hook
+│   ├── iat_hook.rs        # IAT Hook (Windows)
+│   ├── java_hook.rs       # Java Hook (Android)
+│   ├── manager.rs         # Hook 管理器
+│   └── mod.rs
+│
+├── inject/                # 注入模块
+│   ├── ptrace_inject.rs   # ptrace 注入 (Linux)
+│   ├── reflect_inject.rs  # 内存反射注入
+│   ├── zygote_inject.rs   # Zygote 注入 (Android)
+│   ├── win_inject.rs      # DLL 注入 (Windows)
+│   ├── process.rs         # 进程操作
+│   └── mod.rs
+│
+├── memory/                # 内存操作
+│   ├── scanner.rs         # 内存扫描器
+│   ├── elf_parser.rs      # ELF 解析器
+│   ├── allocator.rs       # 远程内存分配
+│   ├── win_scanner.rs     # Windows 内存扫描
+│   ├── win_allocator.rs   # Windows 内存分配
+│   └── mod.rs
+│
+├── anti_detect/           # 反检测模块
+│   ├── smart_stealth.rs   # 智能反检测 (自动分析)
+│   ├── hide.rs            # 综合隐藏管理器
+│   ├── maps_hide.rs       # /proc/self/maps 隐藏
+│   ├── tracer.rs          # TracerPid 隐藏
+│   ├── fd_hide.rs         # 文件描述符隐藏
+│   ├── thread_hide.rs     # 线程隐藏
+│   ├── port_hide.rs       # 端口隐藏
+│   ├── net_hide.rs        # 网络连接隐藏
+│   ├── env_clean.rs       # 环境变量清理
+│   ├── signature.rs       # 特征字符串擦除
+│   ├── stack_fake.rs      # 调用栈伪造
+│   ├── win_hide.rs        # Windows 反检测
+│   └── mod.rs
+│
+├── script/                # 脚本引擎
+│   ├── engine.rs          # Rhai 脚本引擎
+│   ├── host_context.rs    # 宿主上下文
+│   ├── loader.rs          # 脚本加载器
+│   └── mod.rs
+│
+├── communication/         # 通信模块
+│   ├── channel.rs         # Unix Socket/共享内存
+│   ├── protocol.rs        # 通信协议
+│   ├── server.rs          # 通信服务器
+│   ├── win_channel.rs     # Windows Named Pipe
+│   └── mod.rs
+│
+└── common/                # 公共模块
+    ├── types.rs           # 类型定义
+    ├── error.rs           # 错误处理
+    ├── constants.rs       # 常量定义
+    ├── util.rs            # 工具函数
+    ├── win_util.rs        # Windows 工具
+    ├── syscall_wrapper.rs # 系统调用封装
+    └── mod.rs
 `
 
 ## 📋 支持的平台
