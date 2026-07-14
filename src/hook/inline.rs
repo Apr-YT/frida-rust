@@ -186,6 +186,48 @@ mod x86_decoder {
         min_len
     }
 
+    /// 解码 VEX 前缀长度
+    /// VEX prefix:
+    /// - C4 0F XX..: 2-byte VEX (C4 + R + X + B + mm)
+    /// - C5 0F XX..: 3-byte VEX (C5 + R + X + B + mmmm + mm)
+    fn decode_vex_prefix(code: &[u8], idx: &mut usize) -> bool {
+        if *idx >= code.len() {
+            return false;
+        }
+        
+        match code[*idx] {
+            0xc4 => {
+                // 2-byte VEX: C4 + VEX.mmmmm + VEX.pp + opcode
+                if *idx + 2 <= code.len() {
+                    *idx += 2;
+                    true
+                } else {
+                    false
+                }
+            }
+            0xc5 => {
+                // 3-byte VEX: C5 + VEX.mmmmm + VEX.pp + opcode
+                if *idx + 3 <= code.len() {
+                    *idx += 3;
+                    true
+                } else {
+                    false
+                }
+            }
+            0x62 => {
+                // EVEX prefix: 62 + R + X + B + mmmm + pp + opcode
+                // EVEX 是 4 字节前缀
+                if *idx + 4 <= code.len() {
+                    *idx += 4;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// 解码一条 x86_64 指令的长度
     ///
     /// # 参数
@@ -213,12 +255,22 @@ mod x86_decoder {
             return 0;
         }
 
+        // 检查 VEX/EVEX 前缀 (AVX/AVX2/AVX-512 指令)
+        let has_vex = decode_vex_prefix(code, &mut idx);
+
+        if idx >= code.len() {
+            return 0;
+        }
+
         let opcode = code[idx];
 
         // 获取基础指令长度
         let base_len = single_byte_len(opcode);
         if base_len == 0 {
-            // 无法识别的指令，保守返回 1 字节
+            if has_vex {
+                log::debug!("VEX/EVEX 指令 @ {:#x}: opcode={:#04x}", offset as u64, opcode);
+                return decode_avx_instruction_length(code, idx);
+            }
             log::warn!("无法解码指令 @ {:#x}: opcode={:#04x}", offset as u64, opcode);
             return 1;
         }
@@ -238,6 +290,45 @@ mod x86_decoder {
         }
 
         total
+    }
+
+    /// 解码 AVX 指令的长度（保守估计）
+    /// AVX/AVX2/AVX-512 指令通常需要 ModR/M + 可能的立即数字段
+    fn decode_avx_instruction_length(code: &[u8], idx: usize) -> usize {
+        let mut len = 1; // opcode
+        
+        if idx + 1 > code.len() {
+            return len;
+        }
+        
+        let opcode = code[idx];
+        
+        if matches!(opcode, 0x80..=0x8f | 0xc0..=0xcf | 0xd0..=0xdf | 0xe0..=0xef) {
+            len += 1; // ModR/M
+            
+            if idx + 2 > code.len() {
+                return len;
+            }
+            
+            let modrm = code[idx + 1];
+            let mod_val = (modrm >> 6) & 0x03;
+            let rm_val = modrm & 0x07;
+            
+            // 检查 SIB
+            if rm_val == 4 && mod_val != 3 {
+                len += 1;
+            }
+            
+            // 检查位移
+            match mod_val {
+                0b00 => if rm_val == 5 { len += 4; },
+                0b01 => len += 1,
+                0b10 => len += 4,
+                _ => {},
+            }
+        }
+        
+        len
     }
 
     /// 完整的 ModR/M 解码，计算包含 SIB 和位移在内的指令长度
@@ -366,6 +457,28 @@ mod arm64_decoder {
             || (inst & 0x7FC00000) == 0x5C400000
             || (inst & 0x7FC00000) == 0x69C00000
             || (inst & 0x7FC00000) == 0x29C00000
+    }
+
+    /// 判断 STP/LDP 是否使用 PC-relative 寻址
+    /// STP/LDP PC-relative 格式: opc=01, Rn=31 (PC)
+    pub fn is_stp_ldp_pc_relative(inst: u32) -> bool {
+        let opc = (inst >> 22) & 0x03;
+        let rn = (inst >> 5) & 0x1F;
+        opc == 0b01 && rn == 31
+    }
+
+    /// 获取 STP/LDP PC-relative 的偏移量
+    /// imm7 编码在 bits[21:15] 和 bit[22]
+    pub fn get_stp_ldp_pc_offset(inst: u32) -> i64 {
+        let imm7 = ((inst >> 15) & 0x7F) as i64;
+        let size_bit = ((inst >> 22) & 0x01) as i64;
+        let scale = if size_bit == 0 { 1 } else { 2 };
+        let offset = imm7 << (2 + scale);
+        if offset & 0x4000 != 0 {
+            offset | !0x7FFF
+        } else {
+            offset
+        }
     }
 
     /// 计算需要覆盖多少条指令才能容纳跳转指令
@@ -1043,9 +1156,25 @@ impl InlineHooker {
                 let new_inst = (inst & 0xFF00001F) | ((new_imm19 << 5) & 0x00FFFFE0);
                 result.extend_from_slice(&new_inst.to_le_bytes());
             } else if arm64_decoder::is_stp_instruction(inst) || arm64_decoder::is_ldp_instruction(inst) {
-                // STP/LDP 指令 - 可能包含 PC-relative 寻址，需要修正
-                // 简化处理：直接复制（大多数 STP/LDP 使用 SP 或寄存器基址寻址，不需要修正）
-                result.extend_from_slice(&inst.to_le_bytes());
+                // STP/LDP 指令 - 检查是否使用 PC-relative 寻址
+                if arm64_decoder::is_stp_ldp_pc_relative(inst) {
+                    // PC-relative 寻址，需要修正偏移
+                    let original_offset = arm64_decoder::get_stp_ldp_pc_offset(inst);
+                    let target = original_ip as i64 + original_offset;
+                    let new_offset = target - new_ip as i64;
+                    
+                    // 重新编码偏移量
+                    let size_bit = (inst >> 22) & 0x01;
+                    let scale = if size_bit == 0 { 1 } else { 2 };
+                    let imm7 = ((new_offset >> (2 + scale)) & 0x7F) as u32;
+                    
+                    // 清除旧的偏移位，设置新的偏移位
+                    let new_inst = (inst & !0x01FF0000) | (imm7 << 15);
+                    result.extend_from_slice(&new_inst.to_le_bytes());
+                } else {
+                    // 使用 SP 或寄存器基址寻址，不需要修正
+                    result.extend_from_slice(&inst.to_le_bytes());
+                }
             } else {
                 // 其他指令 - 直接复制
                 result.extend_from_slice(&inst.to_le_bytes());

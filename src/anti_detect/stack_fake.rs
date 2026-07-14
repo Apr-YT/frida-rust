@@ -373,13 +373,14 @@ impl StackWalker {
 }
 
 #[cfg(windows)]
+#[link(name = "dbghelp")]
 extern "system" {
     fn CaptureStackBackTrace(
         FramesToSkip: u32,
         FramesToCapture: u32,
         BackTrace: *mut *mut winapi::ctypes::c_void,
         BackTraceHash: *mut u32,
-    ) -> u16;
+    ) -> u32;
 }
 
 #[cfg(test)]

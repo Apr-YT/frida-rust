@@ -131,28 +131,28 @@ impl PeParser {
         let magic = u16::from_le_bytes([pe_header[24], pe_header[25]]);
         let is_64bit = magic == 0x20B;
 
+        // 获取数据目录偏移 (64位: 128, 32位: 112)
+        let data_dir_offset = if is_64bit { 128 } else { 112 };
+
         // 获取导出表 RVA 和大小
-        let (export_rva, export_size) = if is_64bit {
-            let rva = u32::from_le_bytes([
-                pe_header[112], pe_header[113],
-                pe_header[114], pe_header[115],
-            ]);
-            let size = u32::from_le_bytes([
-                pe_header[116], pe_header[117],
-                pe_header[118], pe_header[119],
-            ]);
-            (rva, size)
-        } else {
-            let rva = u32::from_le_bytes([
-                pe_header[96], pe_header[97],
-                pe_header[98], pe_header[99],
-            ]);
-            let size = u32::from_le_bytes([
-                pe_header[100], pe_header[101],
-                pe_header[102], pe_header[103],
-            ]);
-            (rva, size)
-        };
+        let export_rva = u32::from_le_bytes([
+            pe_header[data_dir_offset], pe_header[data_dir_offset + 1],
+            pe_header[data_dir_offset + 2], pe_header[data_dir_offset + 3],
+        ]);
+        let export_size = u32::from_le_bytes([
+            pe_header[data_dir_offset + 4], pe_header[data_dir_offset + 5],
+            pe_header[data_dir_offset + 6], pe_header[data_dir_offset + 7],
+        ]);
+
+        // 获取导入表 RVA 和大小 (DataDirectory[1])
+        let import_rva = u32::from_le_bytes([
+            pe_header[data_dir_offset + 8], pe_header[data_dir_offset + 9],
+            pe_header[data_dir_offset + 10], pe_header[data_dir_offset + 11],
+        ]);
+        let import_size = u32::from_le_bytes([
+            pe_header[data_dir_offset + 12], pe_header[data_dir_offset + 13],
+            pe_header[data_dir_offset + 14], pe_header[data_dir_offset + 15],
+        ]);
 
         // 解析导出表
         let exports = if export_rva > 0 && export_size > 0 {
@@ -161,11 +161,18 @@ impl PeParser {
             Vec::new()
         };
 
+        // 解析导入表
+        let imports = if import_rva > 0 && import_size > 0 {
+            self.parse_import_table(&scanner, base_addr, import_rva, import_size)?
+        } else {
+            Vec::new()
+        };
+
         Ok(PeModuleInfo {
             base_address: base_addr,
-            size: 0, // TODO: 从节表获取
+            size: 0,
             exports,
-            imports: Vec::new(), // TODO: 解析导入表
+            imports,
         })
     }
 
@@ -288,6 +295,111 @@ impl PeParser {
         }
 
         Ok(exports)
+    }
+
+    /// 解析导入表 (IAT)
+    #[cfg(windows)]
+    fn parse_import_table(
+        &self,
+        scanner: &crate::memory::win_scanner::WinMemoryScanner,
+        base_addr: u64,
+        import_rva: u32,
+        _import_size: u32,
+    ) -> Result<Vec<PeImportSymbol>> {
+        let _import_addr = base_addr + import_rva as u64;
+        let mut imports = Vec::new();
+        let mut current_rva = import_rva;
+
+        loop {
+            let import_descriptor_addr = base_addr + current_rva as u64;
+            let import_desc = scanner.dump_region(import_descriptor_addr, 20)?;
+
+            let original_first_thunk = u32::from_le_bytes([
+                import_desc[0], import_desc[1], import_desc[2], import_desc[3],
+            ]);
+            let time_date_stamp = u32::from_le_bytes([
+                import_desc[4], import_desc[5], import_desc[6], import_desc[7],
+            ]);
+            let forwarder_chain = u32::from_le_bytes([
+                import_desc[8], import_desc[9], import_desc[10], import_desc[11],
+            ]);
+            let name_rva = u32::from_le_bytes([
+                import_desc[12], import_desc[13], import_desc[14], import_desc[15],
+            ]);
+            let first_thunk = u32::from_le_bytes([
+                import_desc[16], import_desc[17], import_desc[18], import_desc[19],
+            ]);
+
+            if original_first_thunk == 0 && name_rva == 0 && first_thunk == 0 {
+                break;
+            }
+
+            let module_name = if name_rva > 0 {
+                let name_addr = base_addr + name_rva as u64;
+                if let Ok(name_bytes) = scanner.dump_region(name_addr, 256) {
+                    let name_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(256);
+                    String::from_utf8_lossy(&name_bytes[..name_end]).to_string()
+                } else {
+                    format!("unknown_{}", time_date_stamp)
+                }
+            } else {
+                format!("unnamed_{}", forwarder_chain)
+            };
+
+            let thunk_data = if original_first_thunk > 0 {
+                original_first_thunk
+            } else {
+                first_thunk
+            };
+
+            if thunk_data > 0 {
+                let thunk_addr = base_addr + thunk_data as u64;
+                let mut thunk_index = 0;
+
+                loop {
+                    let entry_addr = thunk_addr + thunk_index * 4;
+                    let entry_data = scanner.dump_region(entry_addr, 4)?;
+                    let entry = u32::from_le_bytes([
+                        entry_data[0], entry_data[1], entry_data[2], entry_data[3],
+                    ]);
+
+                    if entry == 0 {
+                        break;
+                    }
+
+                    let (symbol_name, ordinal) = if (entry & 0x80000000) != 0 {
+                        (None, Some(entry & 0x7FFFFFFF))
+                    } else {
+                        let hint_name_addr = base_addr + entry as u64;
+                        if let Ok(hint_name_data) = scanner.dump_region(hint_name_addr, 256) {
+                            let name_start = 2;
+                            let name_end = hint_name_data[name_start..]
+                                .iter()
+                                .position(|&b| b == 0)
+                                .unwrap_or(254);
+                            let name = String::from_utf8_lossy(&hint_name_data[name_start..name_start + name_end]).to_string();
+                            (Some(name), None)
+                        } else {
+                            (None, None)
+                        }
+                    };
+
+                    if let Some(name) = symbol_name {
+                        imports.push(PeImportSymbol {
+                            name,
+                            from_module: module_name.clone(),
+                            ordinal,
+                        });
+                    }
+
+                    thunk_index += 1;
+                }
+            }
+
+            current_rva += 20;
+        }
+
+        Ok(imports)
     }
 
     /// 查找符号

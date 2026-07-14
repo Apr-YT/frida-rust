@@ -7,6 +7,8 @@ use crate::common::util::{parse_proc_maps, safe_read_bytes};
 #[cfg(unix)]
 use crate::hook::got_plt::GotPltHooker;
 use crate::hook::inline::InlineHooker;
+#[cfg(windows)]
+use crate::memory::pe_parser::PeParser;
 use crate::Result;
 
 use std::collections::HashMap;
@@ -471,14 +473,37 @@ impl HookManager {
         Ok(addr as u64)
     }
 
-    /// 解析模块中的符号地址（Windows 桩函数）
+    /// 解析模块中的符号地址（Windows）
     #[cfg(windows)]
-    pub fn resolve_symbol(&self, _module_base: usize, symbol_name: &str) -> Result<u64> {
-        // Windows 下暂未实现 PE 导出表解析
-        Err(crate::FridaError::NotFound {
-            reason: format!("Windows 下符号解析暂未实现: '{}'", symbol_name),
+    pub fn resolve_symbol(&self, module_base: usize, symbol_name: &str) -> Result<u64> {
+        use crate::inject::win_process;
+
+        let pid = unsafe { winapi::um::processthreadsapi::GetCurrentProcessId() };
+        let mut pe_parser = PeParser::new(pid);
+
+        let modules = win_process::enum_modules(pid)?;
+        let module = modules.iter()
+            .find(|m| (m.base_addr as usize) == module_base)
+            .ok_or_else(|| crate::FridaError::NotFound {
+                reason: format!("未找到基地址为 {:#x} 的模块", module_base),
+            })?;
+
+        let module_name = module.name.to_lowercase();
+        pe_parser.parse_module(&module_name)?;
+
+        if let Some(symbol) = pe_parser.find_symbol(&module_name, symbol_name) {
+            log::debug!(
+                "符号 '{}' 解析地址: {:#x}",
+                symbol_name,
+                symbol.address
+            );
+            Ok(symbol.address)
+        } else {
+            Err(crate::FridaError::NotFound {
+                reason: format!("无法解析符号 '{}' (module_base={:#x})", symbol_name, module_base),
+            }
+            .into())
         }
-        .into())
     }
 
     /// 清除模块基地址缓存

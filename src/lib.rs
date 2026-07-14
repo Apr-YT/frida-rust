@@ -26,6 +26,9 @@ pub mod mcp;
 pub mod ai_learning;
 pub mod webui;
 pub mod esp_analyzer;
+pub mod disasm;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod android;
 
 // 顶层 Result 类型别名，简化返回值书写
 /// 项目统一 Result 类型，使用 anyhow 进行错误传播
@@ -37,5 +40,7 @@ pub use common::types::{
     Architecture, HookPoint, HookType, MemoryRegion, ModuleInfo, ProcessId, ProcessInfo, SymbolInfo,
     ThreadId,
 };
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use communication::kernel_channel::{KernelChannel, NovaCmd};
 
 

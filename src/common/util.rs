@@ -361,15 +361,15 @@ pub fn safe_read_bytes(pid: ProcessId, addr: usize, size: usize) -> crate::Resul
 
 /// 检查指定进程是否存活
 ///
-/// 通过向目标进程发送信号 0（不实际发送信号）来检查进程是否存在。
+/// 通过检查 /proc/[pid] 目录是否存在来判断进程是否存活，
+/// 这种方式在 Android 上不需要特殊权限。
 ///
 /// # 参数
 /// - `pid`: 目标进程 ID
 #[cfg(unix)]
 pub fn is_process_alive(pid: ProcessId) -> bool {
-    // kill(pid, 0) 不会发送信号，只检查进程是否存在
-    // SAFETY: kill with signal 0 is a no-op check
-    unsafe { libc::kill(pid.0 as libc::pid_t, 0) == 0 }
+    let proc_path = format!("/proc/{}", pid.0);
+    std::path::Path::new(&proc_path).exists()
 }
 
 /// 检查指定进程是否存活（Windows 版本）

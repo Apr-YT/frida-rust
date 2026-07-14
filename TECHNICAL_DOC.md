@@ -1,7 +1,7 @@
 # frida-rust 技术文档
 
 > Frida 核心功能的 Rust 实现 —— 动态插桩与逆向工程框架
-> 版本：v0.1.0 | 平台：Linux / Android / Windows
+> 版本：v0.35.0 | 平台：Linux / Android / Windows
 
 ---
 

@@ -1,40 +1,65 @@
-//! 内存扫描器 - 在目标进程内存中搜索特定模式
-//!
-//! 通过解析 `/proc/[pid]/maps` 获取内存布局，使用 `process_vm_readv`
-//! 跨进程读取内存数据，支持字节模式搜索和字符串搜索。
-
 use crate::common::types::{MemoryRegion, ProcessId};
 use crate::common::util::{parse_proc_maps, safe_read_bytes};
 use crate::Result;
 
-// ======================== 内存扫描器 ========================
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::communication::kernel_channel::KernelChannel;
 
-/// 内存扫描器
-///
-/// 在目标进程的内存空间中搜索特定的字节模式或字符串。
 pub struct MemoryScanner {
-    /// 目标进程 ID
     pid: ProcessId,
-    /// 内存区域缓存
     regions: Vec<MemoryRegion>,
-    /// 是否已加载内存布局
     regions_loaded: bool,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_channel: Option<KernelChannel>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_channel_available: bool,
 }
 
 impl MemoryScanner {
-    /// 创建新的内存扫描器
-    ///
-    /// # 参数
-    /// - `pid`: 目标进程 ID（0 表示当前进程）
     pub fn new(pid: ProcessId) -> Self {
         MemoryScanner {
             pid,
             regions: Vec::new(),
             regions_loaded: false,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_channel: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_channel_available: true,
         }
     }
 
-    /// 强制重新加载内存布局
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn ensure_kernel_channel(&mut self) -> Option<&KernelChannel> {
+        if !self.kernel_channel_available {
+            return None;
+        }
+
+        if self.kernel_channel.is_none() {
+            match KernelChannel::new() {
+                Ok(channel) => {
+                    match channel.ping() {
+                        Ok(_) => {
+                            log::info!("内核通道已连接");
+                            self.kernel_channel = Some(channel);
+                        }
+                        Err(e) => {
+                            log::warn!("内核通道不可用，回退到用户态: {}", e);
+                            self.kernel_channel_available = false;
+                            return None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("创建内核通道失败，回退到用户态: {}", e);
+                    self.kernel_channel_available = false;
+                    return None;
+                }
+            }
+        }
+
+        self.kernel_channel.as_ref()
+    }
+
     pub fn refresh_maps(&mut self) -> Result<()> {
         self.regions = parse_proc_maps(self.pid)?;
         self.regions_loaded = true;
@@ -46,7 +71,6 @@ impl MemoryScanner {
         Ok(())
     }
 
-    /// 获取内存布局（延迟加载）
     fn ensure_regions(&mut self) -> Result<()> {
         if !self.regions_loaded {
             self.refresh_maps()?;
@@ -54,7 +78,6 @@ impl MemoryScanner {
         Ok(())
     }
 
-    /// 获取所有可读的内存区域
     fn readable_regions(&mut self) -> Result<Vec<MemoryRegion>> {
         self.ensure_regions()?;
         Ok(self
@@ -65,14 +88,6 @@ impl MemoryScanner {
             .collect())
     }
 
-    /// 在目标进程中搜索字节模式
-    ///
-    /// # 参数
-    /// - `pattern`: 要搜索的字节模式
-    /// - `search_regions`: 可选的内存区域列表。如果为 None，则搜索所有可读区域
-    ///
-    /// # 返回值
-    /// 返回所有匹配的地址列表
     pub fn search_bytes(
         &mut self,
         pattern: &[u8],
@@ -100,14 +115,12 @@ impl MemoryScanner {
                 continue;
             }
 
-            // 限制单次读取大小，避免读取过多匿名映射
-            let read_size = region.size().min(16 * 1024 * 1024); // 最大 16MB
+            let read_size = region.size().min(16 * 1024 * 1024);
             let data = match self.read_region(region.start, read_size) {
                 Ok(d) => d,
-                Err(_) => continue, // 跳过无法读取的区域
+                Err(_) => continue,
             };
 
-            // 使用简单的字节模式匹配（Boyer-Moore 的简化版）
             self.find_pattern_in_data(&data, pattern, region.start as u64, &mut matches);
         }
 
@@ -115,14 +128,6 @@ impl MemoryScanner {
         Ok(matches)
     }
 
-    /// 在目标进程中搜索字符串
-    ///
-    /// # 参数
-    /// - `text`: 要搜索的文本字符串
-    /// - `search_regions`: 可选的内存区域列表
-    ///
-    /// # 返回值
-    /// 返回所有匹配的地址列表
     pub fn search_string(
         &mut self,
         text: &str,
@@ -131,16 +136,6 @@ impl MemoryScanner {
         self.search_bytes(text.as_bytes(), search_regions)
     }
 
-    /// 在目标进程中搜索文本模式（支持简单的通配符）
-    ///
-    /// 使用字节模式匹配在目标进程内存中搜索文本字符串。
-    ///
-    /// # 参数
-    /// - `pattern`: 要搜索的文本模式
-    /// - `search_regions`: 可选的内存区域列表
-    ///
-    /// # 返回值
-    /// 返回所有匹配的地址列表
     pub fn search_pattern(
         &mut self,
         pattern: &str,
@@ -149,15 +144,7 @@ impl MemoryScanner {
         self.search_bytes(pattern.as_bytes(), search_regions)
     }
 
-    /// 转储指定内存区域的数据
-    ///
-    /// # 参数
-    /// - `start`: 起始地址
-    /// - `size`: 读取大小（字节）
-    ///
-    /// # 返回值
-    /// 返回读取到的原始字节数据
-    pub fn dump_region(&self, start: u64, size: usize) -> Result<Vec<u8>> {
+    pub fn dump_region(&mut self, start: u64, size: usize) -> Result<Vec<u8>> {
         if size == 0 {
             return Ok(Vec::new());
         }
@@ -172,17 +159,9 @@ impl MemoryScanner {
         self.read_region(start as usize, size)
     }
 
-    /// 转储指定模块的完整内存
-    ///
-    /// # 参数
-    /// - `module_name`: 模块名称（如 "libc.so.6"）
-    ///
-    /// # 返回值
-    /// 返回 (模块基址, 模块数据) 的元组
     pub fn dump_module(&mut self, module_name: &str) -> Result<(u64, Vec<u8>)> {
         self.ensure_regions()?;
 
-        // 找到模块的所有内存区域
         let module_regions: Vec<&MemoryRegion> = self
             .regions
             .iter()
@@ -199,7 +178,6 @@ impl MemoryScanner {
             .into());
         }
 
-        // 获取模块基址（第一个可执行区域）
         let base_addr = module_regions
             .iter()
             .find(|r| r.perms.execute)
@@ -207,7 +185,6 @@ impl MemoryScanner {
             .or_else(|| module_regions.first().map(|r| r.start as u64))
             .unwrap();
 
-        // 计算模块总大小
         let min_addr = module_regions.iter().map(|r| r.start).min().unwrap();
         let max_addr = module_regions.iter().map(|r| r.end).max().unwrap();
         let total_size = max_addr - min_addr;
@@ -219,7 +196,6 @@ impl MemoryScanner {
             total_size
         );
 
-        // 读取整个模块（包含间隔）
         let mut data = vec![0u8; total_size];
 
         for region in &module_regions {
@@ -233,20 +209,14 @@ impl MemoryScanner {
         Ok((base_addr, data))
     }
 
-    /// 转储目标进程的所有已映射模块
-    ///
-    /// # 返回值
-    /// 返回 HashMap<模块名, 模块数据>
     pub fn dump_process(&mut self) -> Result<std::collections::HashMap<String, Vec<u8>>> {
         self.ensure_regions()?;
 
-        // 收集所有唯一的模块名称
         let mut module_names: Vec<String> = self
             .regions
             .iter()
             .filter(|r| !r.name.is_empty())
             .map(|r| {
-                // 提取模块名（去掉路径前缀）
                 r.name
                     .rsplit('/')
                     .next()
@@ -271,26 +241,31 @@ impl MemoryScanner {
         Ok(result)
     }
 
-    /// 解析 /proc/[pid]/maps 获取内存布局
-    ///
-    /// # 参数
-    /// - `pid`: 目标进程 ID
-    ///
-    /// # 返回值
-    /// 返回所有内存区域
     pub fn parse_maps(pid: ProcessId) -> Result<Vec<MemoryRegion>> {
         parse_proc_maps(pid)
     }
 
-    /// 读取目标进程中指定地址的数据
-    ///
-    /// 对于当前进程（pid=0）直接通过指针读取，
-    /// 对于远程进程通过 process_vm_readv 读取。
-    fn read_region(&self, addr: usize, size: usize) -> Result<Vec<u8>> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn read_region_kernel(&mut self, addr: usize, size: usize) -> Result<Vec<u8>> {
+        if let Some(channel) = self.ensure_kernel_channel() {
+            match channel.read_mem(self.pid.0 as i32, addr, size) {
+                Ok(data) => {
+                    log::trace!("内核通道读取成功: addr={:#x}, size={}", addr, size);
+                    return Ok(data);
+                }
+                Err(e) => {
+                    log::debug!("内核通道读取失败，回退到用户态: {}", e);
+                    self.kernel_channel_available = false;
+                }
+            }
+        }
+
+        self.read_region_fallback(addr, size)
+    }
+
+    fn read_region_fallback(&self, addr: usize, size: usize) -> Result<Vec<u8>> {
         if self.pid.0 == 0 {
-            // 当前进程：直接读取
             let mut buf = vec![0u8; size];
-            // SAFETY: 调用者需确保地址有效
             unsafe {
                 libc::memcpy(
                     buf.as_mut_ptr() as *mut libc::c_void,
@@ -300,14 +275,24 @@ impl MemoryScanner {
             }
             Ok(buf)
         } else {
-            // 远程进程：通过 process_vm_readv
             safe_read_bytes(self.pid, addr, size)
         }
     }
 
-    /// 在数据块中搜索字节模式
-    ///
-    /// 使用简化的搜索算法（逐步扫描），在给定数据块中查找所有匹配位置。
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    fn read_region(&self, addr: usize, size: usize) -> Result<Vec<u8>> {
+        self.read_region_fallback(addr, size)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn read_region(&mut self, addr: usize, size: usize) -> Result<Vec<u8>> {
+        if self.pid.0 == 0 {
+            self.read_region_fallback(addr, size)
+        } else {
+            self.read_region_kernel(addr, size)
+        }
+    }
+
     fn find_pattern_in_data(
         &self,
         data: &[u8],
@@ -321,9 +306,7 @@ impl MemoryScanner {
 
         let mut idx = 0;
         while idx <= data.len() - pattern.len() {
-            // 快速检查第一个字节
             if data[idx] == pattern[0] {
-                // 检查完整模式
                 let mut found = true;
                 for j in 1..pattern.len() {
                     if data[idx + j] != pattern[j] {
@@ -333,7 +316,7 @@ impl MemoryScanner {
                 }
                 if found {
                     matches.push(base_addr + idx as u64);
-                    idx += pattern.len(); // 跳过已匹配的部分
+                    idx += pattern.len();
                     continue;
                 }
             }
@@ -341,19 +324,16 @@ impl MemoryScanner {
         }
     }
 
-    /// 获取已加载的内存区域数量
     pub fn region_count(&mut self) -> Result<usize> {
         self.ensure_regions()?;
         Ok(self.regions.len())
     }
 
-    /// 获取所有内存区域列表的只读引用
     pub fn regions(&mut self) -> Result<&[MemoryRegion]> {
         self.ensure_regions()?;
         Ok(&self.regions)
     }
 
-    /// 查找指定名称的模块区域
     pub fn find_module_regions(&mut self, module_name: &str) -> Result<Vec<MemoryRegion>> {
         self.ensure_regions()?;
         let regions: Vec<MemoryRegion> = self

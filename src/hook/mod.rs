@@ -15,6 +15,10 @@ pub mod iat_hook;
 #[cfg(unix)]
 pub mod java_hook;
 pub mod manager;
+#[cfg(unix)]
+pub mod ebpf_hook;
+#[cfg(unix)]
+pub mod hw_breakpoint;
 
 // 重新导出主要接口
 pub use manager::{HookContext, HookId, HookManager};
@@ -25,3 +29,7 @@ pub use got_plt::{GotPltHooker, GotHookHandle};
 pub use iat_hook::{IatHooker, IatHookHandle};
 #[cfg(unix)]
 pub use java_hook::{JavaHooker, JavaHookHandle};
+#[cfg(unix)]
+pub use ebpf_hook::{EbpfHooker, EbpfHookConfig, EbpfHookEvent, EbpfHookHandle};
+#[cfg(unix)]
+pub use hw_breakpoint::{HardwareBreakpointManager, HardwareBreakpointConfig, HardwareBreakpointHandle};

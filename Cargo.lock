@@ -188,6 +188,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "capstone"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f442ae0f2f3f1b923334b4a5386c95c69c1cfa072bafa23d6fae6d9682eb1dd4"
+dependencies = [
+ "capstone-sys",
+ "static_assertions",
+]
+
+[[package]]
+name = "capstone-sys"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4e8087cab6731295f5a2a2bd82989ba4f41d3a428aab2e7c98d8f4db38aac05"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.67"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -425,12 +444,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "frida-agent"
+version = "0.35.0"
+dependencies = [
+ "libc",
+ "log",
+]
+
+[[package]]
 name = "frida-rust"
 version = "0.35.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
  "byteorder",
+ "capstone",
  "elf",
  "env_logger",
  "goblin",
@@ -1157,6 +1185,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
+ "libc",
+]
+
+[[package]]
+name = "simple-injector"
+version = "0.1.0"
+dependencies = [
  "libc",
 ]
 

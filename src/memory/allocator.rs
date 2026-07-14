@@ -1,20 +1,11 @@
-//! 远程内存分配器 - 在目标进程中分配和管理内存
-//!
-//! 通过 ptrace 在目标进程中执行 mmap/munmap 系统调用，
-//! 实现跨进程的内存分配和释放。
-//!
-//! ## 使用场景
-//! - 注入代码/数据到目标进程
-//! - 在目标进程中分配可执行内存用于 shellcode
-//! - 读写目标进程的数据区域
-
 use crate::common::types::ProcessId;
 use crate::common::util::align_to_page_up;
 use crate::Result;
 
-use std::collections::HashMap;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::communication::kernel_channel::KernelChannel;
 
-// ======================== 架构相关的寄存器类型与常量 ========================
+use std::collections::HashMap;
 
 #[cfg(target_arch = "x86_64")]
 type UserRegs = libc::user_regs_struct;
@@ -43,73 +34,73 @@ const PTRACE_SETREGSET: libc::c_uint = 0x4205;
 #[cfg(target_arch = "aarch64")]
 const NT_PRSTATUS: libc::c_int = 1;
 
-// ======================== 分配记录 ========================
-
-/// 已分配的内存区域记录
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct AllocatedRegion {
-    /// 起始地址
     addr: u64,
-    /// 分配大小
     size: usize,
-    /// 是否可执行
     executable: bool,
-    /// 分配时间戳
     #[allow(dead_code)]
     timestamp: std::time::Instant,
 }
 
-// ======================== 远程内存分配器 ========================
-
-/// 远程内存分配器
-///
-/// 通过在目标进程中执行 mmap/munmap 系统调用来分配和释放内存。
-/// 支持 ptrace 远程调用和 process_vm_readv/writev 数据传输。
 pub struct RemoteAllocator {
-    /// 目标进程 ID
     pid: ProcessId,
-    /// 已分配的内存区域列表
     allocations: HashMap<u64, AllocatedRegion>,
-    /// ptrace 是否已附加
     attached: bool,
-    /// 保存的寄存器上下文（用于 ptrace 调用）
     saved_regs: Option<UserRegs>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_channel: Option<KernelChannel>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_available: bool,
 }
 
 impl RemoteAllocator {
-    /// 创建远程内存分配器
-    ///
-    /// # 参数
-    /// - `pid`: 目标进程 ID
     pub fn new(pid: ProcessId) -> Self {
         RemoteAllocator {
             pid,
             allocations: HashMap::new(),
             attached: false,
             saved_regs: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_channel: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_available: true,
         }
     }
 
-    /// 在目标进程中分配内存
-    ///
-    /// 通过 ptrace 在目标进程中执行 mmap 系统调用。
-    ///
-    /// # 参数
-    /// - `size`: 分配大小（字节），自动向上对齐到页面大小
-    /// - `executable`: 是否需要可执行权限
-    ///
-    /// # 返回值
-    /// 返回分配到的远程内存地址
-    ///
-    /// # 系统调用参数 (x86_64)
-    /// - syscall 号: __NR_mmap (9)
-    /// - rdi: addr (0 = 内核选择)
-    /// - rsi: length
-    /// - rdx: prot (PROT_READ | PROT_WRITE [| PROT_EXEC])
-    /// - r10: flags (MAP_PRIVATE | MAP_ANONYMOUS)
-    /// - r8: fd (-1)
-    /// - r9: offset (0)
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn ensure_kernel_channel(&mut self) -> Option<&KernelChannel> {
+        if !self.kernel_available {
+            return None;
+        }
+
+        if self.kernel_channel.is_none() {
+            match KernelChannel::new() {
+                Ok(channel) => {
+                    match channel.ping() {
+                        Ok(_) => {
+                            log::info!("内核通道已连接，优先使用内核内存读写");
+                            self.kernel_channel = Some(channel);
+                        }
+                        Err(e) => {
+                            log::warn!("内核通道不可用，回退到用户态: {}", e);
+                            self.kernel_available = false;
+                            return None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("创建内核通道失败，回退到用户态: {}", e);
+                    self.kernel_available = false;
+                    return None;
+                }
+            }
+        }
+
+        self.kernel_channel.as_ref()
+    }
+
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn alloc(&mut self, size: usize, executable: bool) -> Result<u64> {
         let aligned_size = align_to_page_up(size);
@@ -135,7 +126,6 @@ impl RemoteAllocator {
             aligned_size
         );
 
-        // 记录分配
         self.allocations.insert(
             addr,
             AllocatedRegion {
@@ -149,12 +139,6 @@ impl RemoteAllocator {
         Ok(addr)
     }
 
-    /// 释放已分配的远程内存
-    ///
-    /// 通过 ptrace 在目标进程中执行 munmap 系统调用。
-    ///
-    /// # 参数
-    /// - `addr`: 之前分配的内存地址
     pub fn free(&mut self, addr: u64) -> Result<()> {
         let region = self.allocations.remove(&addr).ok_or_else(|| {
             crate::FridaError::MemoryWrite {
@@ -182,13 +166,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 向远程进程的内存写入数据
-    ///
-    /// 使用 process_vm_writev 系统调用进行高效的跨进程写入。
-    ///
-    /// # 参数
-    /// - `addr`: 目标地址
-    /// - `data`: 要写入的数据
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<()> {
         log::debug!(
             "写入远程内存: PID {}, 地址={:#x}, 大小={}",
@@ -197,7 +174,6 @@ impl RemoteAllocator {
             data.len()
         );
 
-        // 验证地址在已分配区域内
         if let Some((start, region)) = self.find_region(addr) {
             let end = addr + data.len() as u64;
             let region_end = region.addr + region.size as u64;
@@ -212,7 +188,6 @@ impl RemoteAllocator {
             }
         }
 
-        // 如果是当前进程，直接写入
         if self.pid.0 == 0 {
             unsafe {
                 libc::memcpy(
@@ -224,7 +199,21 @@ impl RemoteAllocator {
             return Ok(());
         }
 
-        // 远程进程：使用 process_vm_writev
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            if let Some(channel) = self.kernel_channel.as_ref() {
+                match channel.write_mem(self.pid.0 as i32, addr as usize, data) {
+                    Ok(()) => {
+                        log::trace!("内核通道写入成功: addr={:#x}, size={}", addr, data.len());
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        log::debug!("内核通道写入失败，回退到用户态: {}", e);
+                    }
+                }
+            }
+        }
+
         let local_iovec = libc::iovec {
             iov_base: data.as_ptr() as *mut libc::c_void,
             iov_len: data.len(),
@@ -235,7 +224,6 @@ impl RemoteAllocator {
             iov_len: data.len(),
         };
 
-        // SAFETY: process_vm_writev 需要调用者确保目标地址合法
         let ret = unsafe {
             crate::common::syscall_wrapper::process_vm_writev(
                 self.pid.0 as libc::pid_t,
@@ -267,16 +255,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 从远程进程的内存读取数据
-    ///
-    /// 使用 process_vm_readv 系统调用进行高效的跨进程读取。
-    ///
-    /// # 参数
-    /// - `addr`: 目标地址
-    /// - `size`: 读取大小
-    ///
-    /// # 返回值
-    /// 返回读取到的数据
     pub fn read(&self, addr: u64, size: usize) -> Result<Vec<u8>> {
         log::debug!(
             "读取远程内存: PID {}, 地址={:#x}, 大小={}",
@@ -285,10 +263,8 @@ impl RemoteAllocator {
             size
         );
 
-        let mut buf = vec![0u8; size];
-
-        // 如果是当前进程，直接读取
         if self.pid.0 == 0 {
+            let mut buf = vec![0u8; size];
             unsafe {
                 libc::memcpy(
                     buf.as_mut_ptr() as *mut libc::c_void,
@@ -299,7 +275,23 @@ impl RemoteAllocator {
             return Ok(buf);
         }
 
-        // 远程进程：使用 process_vm_readv
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            if let Some(channel) = self.kernel_channel.as_ref() {
+                match channel.read_mem(self.pid.0 as i32, addr as usize, size) {
+                    Ok(data) => {
+                        log::trace!("内核通道读取成功: addr={:#x}, size={}", addr, size);
+                        return Ok(data);
+                    }
+                    Err(e) => {
+                        log::debug!("内核通道读取失败，回退到用户态: {}", e);
+                    }
+                }
+            }
+        }
+
+        let mut buf = vec![0u8; size];
+
         let local_iovec = libc::iovec {
             iov_base: buf.as_mut_ptr() as *mut libc::c_void,
             iov_len: size,
@@ -342,12 +334,6 @@ impl RemoteAllocator {
         Ok(buf)
     }
 
-    /// 修改远程内存的保护属性
-    ///
-    /// # 参数
-    /// - `addr`: 内存地址
-    /// - `size`: 大小
-    /// - `prot`: 新的保护属性（libc::PROT_* 标志组合）
     pub fn protect(&self, addr: u64, size: usize, prot: libc::c_int) -> Result<()> {
         log::debug!(
             "修改远程内存保护: PID {}, 地址={:#x}, 大小={}, prot={}",
@@ -358,7 +344,6 @@ impl RemoteAllocator {
         );
 
         if self.pid.0 == 0 {
-            // 当前进程：直接调用 mprotect
             let ret = unsafe {
                 libc::mprotect(
                     align_to_page_up(addr as usize) as *mut libc::c_void,
@@ -376,13 +361,11 @@ impl RemoteAllocator {
             return Ok(());
         }
 
-        // 远程进程：通过 ptrace 调用 mprotect
         self.remote_mprotect(addr, size, prot)?;
 
         Ok(())
     }
 
-    /// 释放所有已分配的远程内存
     pub fn free_all(&mut self) -> Result<()> {
         let addrs: Vec<u64> = self.allocations.keys().copied().collect();
         let errors: Vec<String> = addrs
@@ -400,12 +383,10 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 获取已分配的内存区域数量
     pub fn allocation_count(&self) -> usize {
         self.allocations.len()
     }
 
-    /// 查找包含指定地址的分配区域
     fn find_region(&self, addr: u64) -> Option<(u64, &AllocatedRegion)> {
         for (_, region) in &self.allocations {
             if addr >= region.addr && addr < region.addr + region.size as u64 {
@@ -415,9 +396,6 @@ impl RemoteAllocator {
         None
     }
 
-    // ======================== ptrace 远程调用 ========================
-
-    /// 通过 ptrace 在目标进程中执行 mmap 系统调用
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn remote_mmap(
         &mut self,
@@ -426,7 +404,6 @@ impl RemoteAllocator {
         prot: libc::c_int,
         flags: libc::c_int,
     ) -> Result<u64> {
-        // 如果是当前进程，直接调用 mmap
         if self.pid.0 == 0 {
             let result = unsafe {
                 libc::mmap(
@@ -451,28 +428,21 @@ impl RemoteAllocator {
             return Ok(result as u64);
         }
 
-        // 远程进程：通过 ptrace call_remote
-        // 1. 附加到目标进程
         self.ptrace_attach()?;
-
-        // 2. 保存寄存器状态
         self.save_registers()?;
 
-        // 3. 设置系统调用参数
-        // x86_64: syscall(__NR_mmap, addr, length, prot, flags, fd, offset)
         #[cfg(target_arch = "x86_64")]
         {
-            let nr_mmap: u64 = 9; // __NR_mmap on x86_64
+            let nr_mmap: u64 = 9;
             self.set_registers_for_syscall(
                 nr_mmap,
                 &[addr, size as u64, prot as u64, flags as u64, 0xFFFF_FFFF_FFFF_FFFF_u64, 0],
             )?;
         }
 
-        // AArch64: syscall(__NR_mmap, addr, length, prot, flags, fd, offset)
         #[cfg(target_arch = "aarch64")]
         {
-            let nr_mmap: u64 = 222; // __NR_mmap on AArch64
+            let nr_mmap: u64 = 222;
             self.set_registers_for_syscall(
                 nr_mmap,
                 &[
@@ -486,19 +456,11 @@ impl RemoteAllocator {
             )?;
         }
 
-        // 4. 执行系统调用
         self.execute_syscall()?;
-
-        // 5. 读取返回值
         let result = self.read_syscall_result()?;
-
-        // 6. 恢复寄存器
         self.restore_registers()?;
-
-        // 7. 分离 ptrace
         self.ptrace_detach()?;
 
-        // 检查 mmap 返回值（MAP_FAILED = (void*)-1）
         if result == 0xFFFF_FFFF_FFFF_FFFF_u64 {
             return Err(crate::FridaError::MemoryWrite {
                 address: 0,
@@ -511,7 +473,6 @@ impl RemoteAllocator {
         Ok(result)
     }
 
-    /// 通过 ptrace 在目标进程中执行 munmap 系统调用
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn remote_munmap(&mut self, addr: u64, size: usize) -> Result<()> {
         if self.pid.0 == 0 {
@@ -532,13 +493,13 @@ impl RemoteAllocator {
 
         #[cfg(target_arch = "x86_64")]
         {
-            let nr_munmap: u64 = 11; // __NR_munmap on x86_64
+            let nr_munmap: u64 = 11;
             self.set_registers_for_syscall(nr_munmap, &[addr, size as u64, 0, 0, 0, 0])?;
         }
 
         #[cfg(target_arch = "aarch64")]
         {
-            let nr_munmap: u64 = 215; // __NR_munmap on AArch64
+            let nr_munmap: u64 = 215;
             self.set_registers_for_syscall(nr_munmap, &[addr, size as u64, 0, 0, 0, 0])?;
         }
 
@@ -549,7 +510,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 通过 ptrace 在目标进程中执行 mprotect 系统调用
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn remote_mprotect(&self, addr: u64, size: usize, prot: libc::c_int) -> Result<()> {
         if self.pid.0 == 0 {
@@ -570,8 +530,6 @@ impl RemoteAllocator {
             return Ok(());
         }
 
-        // 远程进程 mprotect 需要先 attach
-        // 简化实现：返回错误，提示需要先调用者处理 ptrace attach
         log::warn!("远程 mprotect 需要目标进程处于 ptrace 停止状态");
 
         Err(crate::FridaError::Unsupported {
@@ -580,9 +538,6 @@ impl RemoteAllocator {
         .into())
     }
 
-    // ---- ptrace 辅助方法 ----
-
-    /// ptrace 附加到目标进程
     fn ptrace_attach(&mut self) -> Result<()> {
         if self.attached {
             return Ok(());
@@ -598,7 +553,6 @@ impl RemoteAllocator {
             .into());
         }
 
-        // 等待目标进程停止
         let mut status: libc::c_int = 0;
         let _ = unsafe { libc::waitpid(self.pid.0 as libc::pid_t, &mut status, 0) };
 
@@ -607,7 +561,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// ptrace 分离目标进程
     fn ptrace_detach(&mut self) -> Result<()> {
         if !self.attached {
             return Ok(());
@@ -626,7 +579,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 保存当前寄存器状态
     #[cfg(target_arch = "x86_64")]
     fn save_registers(&mut self) -> Result<()> {
         let mut regs: UserRegs = unsafe { std::mem::zeroed() };
@@ -681,7 +633,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 恢复寄存器状态
     #[cfg(target_arch = "x86_64")]
     fn restore_registers(&self) -> Result<()> {
         if let Some(ref regs) = self.saved_regs {
@@ -734,7 +685,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 设置寄存器用于系统调用
     #[cfg(target_arch = "x86_64")]
     fn set_registers_for_syscall(
         &self,
@@ -746,9 +696,6 @@ impl RemoteAllocator {
             None => unsafe { std::mem::zeroed() },
         };
 
-        // x86_64 系统调用约定:
-        // rax = syscall number
-        // rdi, rsi, rdx, r10, r8, r9 = 参数
         regs.rax = syscall_nr;
         regs.rdi = args[0];
         regs.rsi = args[1];
@@ -756,8 +703,6 @@ impl RemoteAllocator {
         regs.r10 = args[3];
         regs.r8 = args[4];
         regs.r9 = args[5];
-
-        // 设置 orig_rax 以便 ptrace 正确处理系统调用
         regs.orig_rax = syscall_nr;
 
         let ret = unsafe {
@@ -786,9 +731,6 @@ impl RemoteAllocator {
         syscall_nr: u64,
         args: &[u64; 6],
     ) -> Result<()> {
-        // AArch64 系统调用约定:
-        // x8 = syscall number
-        // x0-x5 = 参数
         let mut regs: UserRegs = match &self.saved_regs {
             Some(r) => *r,
             None => unsafe { std::mem::zeroed() },
@@ -824,10 +766,7 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 执行系统调用并等待完成
     fn execute_syscall(&self) -> Result<()> {
-        // 单步执行到 syscall 指令
-        // 使用 PTRACE_SYSCALL 让进程执行到下一个系统调用入口/出口
         loop {
             let ret = unsafe {
                 libc::ptrace(
@@ -849,11 +788,9 @@ impl RemoteAllocator {
             let mut status: libc::c_int = 0;
             let _ = unsafe { libc::waitpid(self.pid.0 as libc::pid_t, &mut status, 0) };
 
-            // 检查是否到达 syscall 入口 (WIFSTOPPED && (status >> 8 == (SIGTRAP | PTRACE_SYSCALL))
             if libc::WIFSTOPPED(status) {
                 let sig = libc::WSTOPSIG(status);
                 if sig == (libc::SIGTRAP | 0x80) {
-                    // 到达 syscall 入口
                     break;
                 }
             }
@@ -861,7 +798,6 @@ impl RemoteAllocator {
         Ok(())
     }
 
-    /// 读取系统调用返回值
     #[cfg(target_arch = "x86_64")]
     fn read_syscall_result(&self) -> Result<u64> {
         let mut regs: UserRegs = unsafe { std::mem::zeroed() };
@@ -882,7 +818,6 @@ impl RemoteAllocator {
             .into());
         }
 
-        // x86_64: 返回值在 rax
         Ok(regs.rax)
     }
 
@@ -910,7 +845,6 @@ impl RemoteAllocator {
             .into());
         }
 
-        // AArch64: 返回值在 x0 (regs[0])
         Ok(regs.regs[0])
     }
 }
@@ -923,12 +857,10 @@ impl Default for RemoteAllocator {
 
 impl Drop for RemoteAllocator {
     fn drop(&mut self) {
-        // 分离 ptrace（如果仍然附加）
         if self.attached {
             let _ = self.ptrace_detach();
         }
 
-        // 释放所有分配（最佳努力）
         if !self.allocations.is_empty() {
             log::warn!(
                 "RemoteAllocator 析构时仍有 {} 个未释放的内存分配",

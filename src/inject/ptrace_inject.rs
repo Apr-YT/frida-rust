@@ -121,14 +121,17 @@ impl PtraceInjector {
             if ret == 0 {
                 log::info!("ptrace SEIZE 到 PID {} 成功 (无 SIGSTOP)", pid.0);
                 // SEIZE 后立即用 INTERRUPT 停止主线程
-                let _ = unsafe { libc::ptrace(PTRACE_INTERRUPT_VAL, pid_i32, 0, 0) };
+                let interrupt_ret = unsafe { libc::ptrace(PTRACE_INTERRUPT_VAL, pid_i32, 0, 0) };
+                if interrupt_ret != 0 {
+                    log::warn!("PTRACE_INTERRUPT 失败，尝试直接等待");
+                }
                 self.wait_for_stop(pid)?;
                 self.attached = true;
                 self.target_pid = Some(pid);
                 log::info!("ptrace attach 到 PID {} 成功 (SEIZE+INTERRUPT)", pid.0);
                 return Ok(());
             }
-            log::debug!("PTRACE_SEIZE 失败 (errno={}), 回退 PTRACE_ATTACH", std::io::Error::last_os_error());
+            log::info!("PTRACE_SEIZE 失败 (errno={}), 回退 PTRACE_ATTACH", std::io::Error::last_os_error());
         }
 
         // 回退：传统 PTRACE_ATTACH
@@ -249,6 +252,8 @@ impl PtraceInjector {
             iov_len: std::mem::size_of::<UserRegs>(),
         };
 
+        log::debug!("get_regs: tid={}, iov_len={}", tid, iov.iov_len);
+
         // SAFETY: ptrace(PTRACE_GETREGSET) 需要在已附加的线程上调用
         let ret = unsafe {
             libc::ptrace(
@@ -261,14 +266,25 @@ impl PtraceInjector {
 
         if ret != 0 {
             let errno = std::io::Error::last_os_error();
-            return Err(FridaError::Ptrace {
-                op: "GETREGSET".to_string(),
-                pid: tid as u32,
-                detail: format!("读取寄存器失败: {}", errno),
+            log::error!("PTRACE_GETREGSET 失败: tid={}, errno={}, raw={:?}", tid, errno, errno.raw_os_error());
+            
+            // 尝试直接读取寄存器（备用方案）
+            log::info!("尝试使用 PTRACE_PEEKUSER 读取寄存器");
+            let mut fallback_regs: UserRegs = unsafe { std::mem::zeroed() };
+            for i in 0..31 {
+                let reg_val = unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, tid, i * 8, 0) };
+                fallback_regs.regs[i] = reg_val as u64;
             }
-            .into());
+            let sp = unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, tid, 31 * 8, 0) };
+            fallback_regs.sp = sp as u64;
+            let pc = unsafe { libc::ptrace(libc::PTRACE_PEEKUSER, tid, 32 * 8, 0) };
+            fallback_regs.pc = pc as u64;
+            
+            log::info!("备用方案读取完成: sp={:#x}, pc={:#x}", fallback_regs.sp, fallback_regs.pc);
+            return Ok(fallback_regs);
         }
 
+        log::debug!("get_regs 成功: sp={:#x}, pc={:#x}", regs.sp, regs.pc);
         Ok(regs)
     }
 
@@ -527,11 +543,24 @@ impl PtraceInjector {
         let max_wait = std::time::Duration::from_secs(3);
         let mut status: libc::c_int = 0;
         let mut first_wait = true;
+        let mut interrupted = false;
         loop {
-            if start.elapsed() > max_wait {
+            if start.elapsed() > max_wait && !interrupted {
                 // 超时：尝试用 PTRACE_INTERRUPT 强制停止
+                log::warn!("远程调用超时 ({:?})，尝试强制中断", start.elapsed());
                 let _ = unsafe { libc::ptrace(PTRACE_INTERRUPT_VAL, tid, 0, 0) };
+                interrupted = true;
                 std::thread::sleep(std::time::Duration::from_millis(100));
+                
+                // 使用 PTRACE_GETSIGINFO 确认线程状态
+                let mut siginfo: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                let ret = unsafe {
+                    libc::ptrace(libc::PTRACE_GETSIGINFO, tid, 0, &mut siginfo as *mut _ as *mut libc::c_void)
+                };
+                if ret == 0 {
+                    log::debug!("线程 {} 信号信息: si_signo={}, si_code={}", 
+                        tid, siginfo.si_signo, siginfo.si_code);
+                }
             }
             // 第一次尝试阻塞，之后丢轮询
             let flags = if first_wait { 0 } else { libc::WNOHANG };
@@ -565,8 +594,9 @@ impl PtraceInjector {
             if libc::WIFSTOPPED(status) {
                 let sig = libc::WSTOPSIG(status);
                 // SIGSEGV from LR=0, SIGTRAP from BKPT trap page, SIGILL from invalid code
-                if sig == libc::SIGSEGV || sig == libc::SIGTRAP || sig == libc::SIGILL {
-                    break; // 预期信号：远程函数执行完毕
+                // SIGINT from PTRACE_INTERRUPT
+                if sig == libc::SIGSEGV || sig == libc::SIGTRAP || sig == libc::SIGILL || sig == libc::SIGINT {
+                    break; // 预期信号：远程函数执行完毕或被中断
                 }
                 if sig == libc::SIGSTOP {
                     // 额外的 SIGSTOP（多线程 ptrace 行为），继续执行
@@ -872,6 +902,20 @@ impl PtraceInjector {
             .or_else(|_| self.find_remote_symbol(pid, "dlopen"))
     }
 
+    /// 查找目标进程中 android_dlopen_ext 函数的地址
+    /// 
+    /// Android 10+ 引入了 linker namespace 隔离，普通 dlopen 无法加载未在应用 namespace 中的库。
+    /// android_dlopen_ext 可以指定 namespace 参数绕过隔离。
+    pub fn find_remote_android_dlopen_ext(&self, pid: ProcessId) -> crate::Result<u64> {
+        self.find_remote_symbol(pid, "android_dlopen_ext")
+            .or_else(|_| {
+                self.find_remote_symbol(pid, "__dl___loader_android_dlopen_ext")
+            })
+            .or_else(|_| {
+                self.find_remote_symbol(pid, "_ZN3art11JavaVMExt17LoadNativeLibraryEP7_JNIEnvPKcP8_jobjectP8_jstring")
+            })
+    }
+
     /// 查找目标进程中 dlsym 函数的地址
     pub fn find_remote_dlsym(&self, pid: ProcessId) -> crate::Result<u64> {
         self.find_remote_symbol(pid, "__libc_dlsym")
@@ -888,6 +932,7 @@ impl PtraceInjector {
     ///
     /// 通过解析 /proc/pid/maps 找到包含该符号的库，
     /// 然后在本地查找对应库的符号偏移量，计算远程地址。
+    /// 如果本地查找失败，则在目标进程内存中直接解析 ELF 符号表。
     fn find_remote_symbol(&self, pid: ProcessId, symbol_name: &str) -> crate::Result<u64> {
         use crate::inject::process;
 
@@ -909,6 +954,23 @@ impl PtraceInjector {
                         module.name,
                         module.base_addr,
                         offset,
+                        remote_addr
+                    );
+                    return Ok(remote_addr);
+                }
+                
+                // 本地查找失败，尝试在目标进程内存中直接解析 ELF
+                log::debug!("本地查找符号 {} 失败，尝试在进程内存中解析", symbol_name);
+                if let Some(remote_addr) = self.find_remote_symbol_in_memory(
+                    pid, 
+                    module.base_addr as u64, 
+                    symbol_name
+                )? {
+                    log::debug!(
+                        "符号 {} 在 {} 中: base={:#x}, remote={:#x} (内存解析)",
+                        symbol_name,
+                        module.name,
+                        module.base_addr,
                         remote_addr
                     );
                     return Ok(remote_addr);
@@ -957,6 +1019,65 @@ impl PtraceInjector {
         }
 
         Ok(None)
+    }
+
+    /// 在目标进程内存中直接解析 ELF 符号
+    ///
+    /// 通过读取目标进程内存中的 libc.so ELF 头，
+    /// 解析 .dynsym 和 .dynstr 表来查找符号地址。
+    /// 这是本地查找失败时的备用方案，适用于 Android 环境。
+    fn find_remote_symbol_in_memory(
+        &self,
+        pid: ProcessId,
+        lib_base: u64,
+        symbol_name: &str,
+    ) -> crate::Result<Option<u64>> {
+        // 读取 ELF 头（足够确定文件类型和大小）
+        let elf_header_size = std::mem::size_of::<goblin::elf::Header>();
+        let header_data = self.read_remote(pid, lib_base as usize, elf_header_size)?;
+        
+        let header = goblin::elf::Header::parse(&header_data)
+            .map_err(|e| FridaError::Other(format!("解析 ELF 头失败: {}", e)))?;
+        
+        // 读取完整的 ELF 文件（从内存中）
+        let elf_size = header.e_shoff as usize + header.e_shentsize as usize * header.e_shnum as usize;
+        let elf_data = self.read_remote(pid, lib_base as usize, elf_size)?;
+        
+        match goblin::Object::parse(&elf_data) {
+            Ok(goblin::Object::Elf(elf)) => {
+                // 在动态符号表中查找
+                for sym in &elf.dynsyms {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if name == symbol_name {
+                            let remote_addr = lib_base + sym.st_value as u64;
+                            log::debug!(
+                                "在目标进程内存中找到符号 {}: {:#x}",
+                                symbol_name,
+                                remote_addr
+                            );
+                            return Ok(Some(remote_addr));
+                        }
+                    }
+                }
+                // 在常规符号表中查找
+                for sym in &elf.syms {
+                    if let Some(name) = elf.strtab.get_at(sym.st_name) {
+                        if name == symbol_name {
+                            let remote_addr = lib_base + sym.st_value as u64;
+                            log::debug!(
+                                "在目标进程内存中找到符号 {}: {:#x}",
+                                symbol_name,
+                                remote_addr
+                            );
+                            return Ok(Some(remote_addr));
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            Err(e) => Err(FridaError::Other(format!("解析进程内存中的 ELF 失败: {}", e)))?,
+            _ => Ok(None),
+        }
     }
 
     /// 等待目标进程停止

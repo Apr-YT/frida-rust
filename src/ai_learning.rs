@@ -617,12 +617,65 @@ impl AILearningEngine {
     // ==================== 持久化 ====================
 
     fn save(&self) {
-        // TODO: 保存到文件
+        let data = AILearningData {
+            operations: self.operations.clone(),
+            strategies: self.strategies.clone(),
+            knowledge: self.knowledge.clone(),
+            counter: self.counter,
+            stats: self.stats.clone(),
+        };
+
+        if let Some(parent) = self.storage_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("无法创建存储目录: {}", e);
+                return;
+            }
+        }
+
+        if let Ok(json) = serde_json::to_string_pretty(&data) {
+            if let Err(e) = std::fs::write(&self.storage_path, json) {
+                log::warn!("保存学习数据失败: {}", e);
+            } else {
+                log::debug!("学习数据已保存到: {}", self.storage_path.display());
+            }
+        } else {
+            log::warn!("序列化学习数据失败");
+        }
     }
 
     fn load(&mut self) {
-        // TODO: 从文件加载
+        if !self.storage_path.exists() {
+            log::debug!("学习数据文件不存在，跳过加载");
+            return;
+        }
+
+        if let Ok(content) = std::fs::read_to_string(&self.storage_path) {
+            if let Ok(data) = serde_json::from_str::<AILearningData>(&content) {
+                self.operations = data.operations;
+                self.strategies = data.strategies;
+                self.knowledge = data.knowledge;
+                self.counter = data.counter;
+                self.stats = data.stats;
+                log::debug!("学习数据已从 {} 加载 ({} 条操作, {} 个策略)", 
+                    self.storage_path.display(),
+                    self.operations.len(),
+                    self.strategies.len());
+            } else {
+                log::warn!("反序列化学习数据失败");
+            }
+        } else {
+            log::warn!("读取学习数据文件失败");
+        }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AILearningData {
+    operations: Vec<OperationResult>,
+    strategies: Vec<Strategy>,
+    knowledge: HashMap<String, KnowledgeNode>,
+    counter: u64,
+    stats: LearningStats,
 }
 
 /// 操作追踪器

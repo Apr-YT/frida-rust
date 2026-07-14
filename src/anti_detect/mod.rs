@@ -35,6 +35,8 @@ pub mod env_clean;
 pub mod net_hide;
 #[cfg(unix)]
 pub mod smart_stealth;
+#[cfg(target_os = "android")]
+pub mod linker_hide;
 
 #[cfg(windows)]
 pub mod win_hide;
@@ -59,6 +61,8 @@ pub use env_clean::EnvCleaner;
 pub use net_hide::NetHider;
 #[cfg(unix)]
 pub use smart_stealth::SmartStealth;
+#[cfg(target_os = "android")]
+pub use linker_hide::{LinkerHideManager, SoinfoNode, SoinfoHideStatus};
 
 /// 应用所有反检测措施
 ///

@@ -75,19 +75,27 @@ struct SymbolListParams { pid: u32, module: String }
 struct SymbolFindParams { pid: u32, module: String, symbol: String }
 
 #[derive(Deserialize, JsonSchema)]
-struct StealthParams { pid: u32, auto_detect: Option<bool> }
+struct StealthParams { #[allow(dead_code)] pid: u32, auto_detect: Option<bool> }
 
 #[derive(Deserialize, JsonSchema)]
 struct AILearnParams { action: String, problem: Option<String>, context: Option<String>, solution: Option<String>, success: Option<bool>, anti_cheat: Option<String> }
 
 #[derive(Deserialize, JsonSchema)]
-struct AIQueryParams { query_type: String, anti_cheat: Option<String>, target: Option<String> }
+struct AIQueryParams { query_type: String, anti_cheat: Option<String>, #[allow(dead_code)] target: Option<String> }
 
 #[derive(Deserialize, JsonSchema)]
 struct ESPAnalyzeParams { pid: u32, template: Option<String> }
 
 #[derive(Deserialize, JsonSchema)]
 struct ESPGenerateParams { pid: u32, engine: String }
+
+#[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct AndroidPackageParams { package_name: String }
+
+#[derive(Deserialize, JsonSchema)]
+#[allow(dead_code)]
+struct AndroidLogcatParams { tag: Option<String>, level: Option<String>, pid: Option<u32> }
 
 #[derive(Clone)]
 pub struct FridaMcpServer;
@@ -199,13 +207,13 @@ impl FridaMcpServer {
             let addr = parse_hex(&p.address)?;
             if p.size > 0x100000 { return Err(McpError::invalid_params("最大 1MB", None)); }
             #[cfg(unix)] {
-                let mut s = crate::memory::MemoryScanner::new(ProcessId(p.pid));
+                let s = crate::memory::MemoryScanner::new(ProcessId(p.pid));
                 let d = s.dump_region(addr as u64, p.size)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 Ok(format_hex_dump(&d, addr))
             }
             #[cfg(windows)] {
-                let mut s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
+                let s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 let d = s.dump_region(addr as u64, p.size)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
@@ -484,7 +492,7 @@ impl FridaMcpServer {
     #[tool(description = "AI查询 - 查询知识库/经验/策略 (type: knowledge/strategy/stats)")]
     async fn ai_query(&self, Parameters(p): Parameters<AIQueryParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            let mut engine = get_ai_engine();
+            let engine = get_ai_engine();
             let engine = engine.as_ref().unwrap();
 
             match p.query_type.as_str() {
@@ -565,6 +573,117 @@ impl FridaMcpServer {
             };
             let code = analyzer.generate_esp_code(&engine);
             Ok(format!("=== ESP 代码 ({:?}) ===\n\n{}", engine, code))
+        }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
+
+    // ==================== android/ ====================
+
+    #[tool(description = "列出运行中的 Android 应用进程")]
+    async fn android_processes(&self) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(any(target_os = "linux", target_os = "android"))] {
+                use crate::android::process::list_running_packages;
+                let packages = list_running_packages()
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                
+                let mut output = format!("=== 运行中的 Android 应用 ({}) ===\n\n", packages.len());
+                for p in &packages {
+                    output.push_str(&format!("包名: {}\n", p.package_name));
+                    output.push_str(&format!("  PID: {}\n", p.pid.0));
+                    output.push_str(&format!("  进程名: {}\n", p.process_name));
+                    output.push_str(&format!("  UID: {}\n", p.uid));
+                    output.push_str(&format!("  SELinux: {}\n", p.selinux_context));
+                    output.push_str("\n");
+                }
+                Ok(output)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            Ok("Android 工具仅在 Linux/Android 平台可用".to_string())
+        }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
+
+    #[tool(description = "按包名查找进程 PID")]
+    async fn android_find_pid(&self, Parameters(_p): Parameters<AndroidPackageParams>) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(any(target_os = "linux", target_os = "android"))] {
+                use crate::android::process::get_pid_by_package;
+                let pids = get_pid_by_package(&p.package_name)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                
+                if pids.is_empty() {
+                    Ok(format!("未找到包名 '{}' 的进程", p.package_name))
+                } else {
+                    let mut output = format!("包名 '{}' 的进程:\n", p.package_name);
+                    for pid in pids {
+                        output.push_str(&format!("  PID: {}\n", pid.0));
+                    }
+                    Ok(output)
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            Ok("Android 工具仅在 Linux/Android 平台可用".to_string())
+        }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
+
+    #[tool(description = "列出已安装的 Android 包")]
+    async fn android_packages(&self) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(any(target_os = "linux", target_os = "android"))] {
+                use crate::android::process::list_installed_packages;
+                let packages = list_installed_packages()
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                
+                let mut output = format!("=== 已安装包 ({}) ===\n\n", packages.len());
+                for p in &packages {
+                    output.push_str(&format!("{} ({})\n", p.app_name, p.package_name));
+                    output.push_str(&format!("  版本: {}\n", p.version_name));
+                    output.push_str(&format!("  路径: {}\n", p.apk_path));
+                    output.push_str("\n");
+                }
+                Ok(output)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            Ok("Android 工具仅在 Linux/Android 平台可用".to_string())
+        }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
+
+    #[tool(description = "获取 logcat 日志快照 (tag/level/pid 可选)")]
+    async fn android_logcat(&self, Parameters(_p): Parameters<AndroidLogcatParams>) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            #[cfg(any(target_os = "linux", target_os = "android"))] {
+                use crate::android::logcat::{get_logcat_snapshot, LogLevel};
+                
+                let level = p.level.as_deref().map(|s| match s.to_uppercase().as_str() {
+                    "V" => LogLevel::Verbose,
+                    "D" => LogLevel::Debug,
+                    "I" => LogLevel::Info,
+                    "W" => LogLevel::Warn,
+                    "E" => LogLevel::Error,
+                    "A" => LogLevel::Assert,
+                    _ => LogLevel::Info,
+                });
+                
+                let entries = get_logcat_snapshot(p.tag.as_deref(), level, p.pid)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+                
+                let mut output = format!("=== Logcat 快照 ({}) ===\n\n", entries.len());
+                for entry in entries.iter().take(50) {
+                    output.push_str(&format!("[{}] {} {} ({}-{}) {}\n", 
+                        entry.time,
+                        entry.level,
+                        entry.tag,
+                        entry.pid,
+                        entry.tid,
+                        entry.message
+                    ));
+                }
+                if entries.len() > 50 {
+                    output.push_str(&format!("\n... 还有 {} 条", entries.len() - 50));
+                }
+                Ok(output)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            Ok("Android 工具仅在 Linux/Android 平台可用".to_string())
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
 
@@ -682,30 +801,15 @@ fn format_hex_dump(data: &[u8], base_addr: usize) -> String {
 }
 
 fn format_disassembly(bytes: &[u8], base_addr: usize, max_instr: usize) -> String {
-    let mut output = format!("Disassembly @ {:#x}:\n\n", base_addr);
-    let mut offset = 0;
-    let mut count = 0;
-    while offset < bytes.len() && count < max_instr {
-        let (instr, len) = simple_disasm(&bytes[offset..]);
-        output.push_str(&format!("{:#010x}: {}\n", base_addr + offset, instr));
-        offset += len;
-        count += 1;
-    }
-    output
-}
-
-fn simple_disasm(bytes: &[u8]) -> (String, usize) {
-    if bytes.is_empty() { return ("???".to_string(), 1); }
-    match bytes[0] {
-        0x55 => ("push rbp".to_string(), 1),
-        0x5D => ("pop rbp".to_string(), 1),
-        0xC3 => ("ret".to_string(), 1),
-        0x90 => ("nop".to_string(), 1),
-        0xCC => ("int3".to_string(), 1),
-        0xE8 if bytes.len() > 4 => {
-            let off = i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
-            (format!("call {:+#x}", off), 5)
-        },
-        _ => (format!("db {:#04x}", bytes[0]), 1),
+    match crate::disasm::Disassembler::for_current_arch() {
+        Ok(disasm) => {
+            match disasm.disassemble_to_string(bytes, base_addr as u64, Some(max_instr)) {
+                Ok(output) => output,
+                Err(e) => format!("反汇编失败: {}\n", e),
+            }
+        }
+        Err(e) => {
+            format!("创建反汇编器失败: {}\n", e)
+        }
     }
 }

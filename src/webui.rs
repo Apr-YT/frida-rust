@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use serde::{Serialize, Deserialize};
 
 // ======================== 日志条目 ========================

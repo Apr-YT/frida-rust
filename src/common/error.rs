@@ -140,9 +140,17 @@ pub enum FridaError {
         reason: String,
     },
 
-    /// 加密/解密失败
+    /// 加密操作失败
     #[error("加密操作失败: {reason}")]
     Crypto {
+        /// 错误原因
+        reason: String,
+    },
+
+    // ======================== 反汇编相关错误 ========================
+    /// 反汇编操作失败
+    #[error("反汇编失败: {reason}")]
+    Disasm {
         /// 错误原因
         reason: String,
     },

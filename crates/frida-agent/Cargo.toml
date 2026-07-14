@@ -1,0 +1,19 @@
+[package]
+name = "frida-agent"
+version = "0.35.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
+
+[lib]
+name = "frida_agent"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
