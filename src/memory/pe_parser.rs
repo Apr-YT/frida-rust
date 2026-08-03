@@ -133,7 +133,8 @@ impl PeParser {
         let is_64bit = magic == 0x20B;
 
         // 获取数据目录偏移 (64位: 128, 32位: 112)
-        let data_dir_offset = if is_64bit { 128 } else { 112 };
+        // PE 签名(4) + COFF 头(20) = 24；DataDirectory 位于可选头偏移 112(PE32+)/96(PE32)
+        let data_dir_offset = 24 + if is_64bit { 112 } else { 96 };
 
         // 获取导出表 RVA 和大小
         let export_rva = u32::from_le_bytes([
@@ -164,14 +165,51 @@ impl PeParser {
 
         // 解析导入表
         let imports = if import_rva > 0 && import_size > 0 {
-            self.parse_import_table(&scanner, base_addr, import_rva, import_size)?
+            self.parse_import_table(&scanner, base_addr, import_rva, import_size, is_64bit)?
         } else {
             Vec::new()
         };
 
+        // 从节表计算模块大小（最后一个节的虚拟地址 + 虚拟大小）
+        let num_sections = u16::from_le_bytes([pe_header[6], pe_header[7]]) as usize;
+        let size_of_optional_header =
+            u16::from_le_bytes([pe_header[20], pe_header[21]]) as usize;
+        let size = if num_sections > 0 && num_sections <= 96 {
+            // section table 位于 PE 签名(4) + COFF 头(20) + 可选头之后
+            let section_table_offset = 24 + size_of_optional_header;
+            let section_table_addr = base_addr + pe_offset + section_table_offset as u64;
+            if let Ok(sections) = scanner.dump_region(section_table_addr, num_sections * 40) {
+                let mut max_end = 0u64;
+                for i in 0..num_sections {
+                    let off = i * 40;
+                    let virtual_size = u32::from_le_bytes([
+                        sections[off + 8], sections[off + 9],
+                        sections[off + 10], sections[off + 11],
+                    ]);
+                    let virtual_address = u32::from_le_bytes([
+                        sections[off + 12], sections[off + 13],
+                        sections[off + 14], sections[off + 15],
+                    ]);
+                    let size_of_raw_data = u32::from_le_bytes([
+                        sections[off + 16], sections[off + 17],
+                        sections[off + 18], sections[off + 19],
+                    ]);
+                    let end = virtual_address as u64 + virtual_size.max(size_of_raw_data) as u64;
+                    if end > max_end {
+                        max_end = end;
+                    }
+                }
+                max_end as u32
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         Ok(PeModuleInfo {
             base_address: base_addr,
-            size: 0,
+            size,
             exports,
             imports,
         })
@@ -205,12 +243,14 @@ impl PeParser {
         let _ordinal_base = u32::from_le_bytes([
             export_dir[16], export_dir[17], export_dir[18], export_dir[19],
         ]);
-        let num_functions = u32::from_le_bytes([
+        // 防御上限：避免损坏的 PE 头导致超大内存分配
+        const MAX_EXPORTS: usize = 100_000;
+        let num_functions = (u32::from_le_bytes([
             export_dir[20], export_dir[21], export_dir[22], export_dir[23],
-        ]) as usize;
-        let num_names = u32::from_le_bytes([
+        ]) as usize).min(MAX_EXPORTS);
+        let num_names = (u32::from_le_bytes([
             export_dir[24], export_dir[25], export_dir[26], export_dir[27],
-        ]) as usize;
+        ]) as usize).min(MAX_EXPORTS);
         let functions_rva = u32::from_le_bytes([
             export_dir[28], export_dir[29], export_dir[30], export_dir[31],
         ]);
@@ -306,6 +346,7 @@ impl PeParser {
         base_addr: u64,
         import_rva: u32,
         _import_size: u32,
+        is_64bit: bool,
     ) -> Result<Vec<PeImportSymbol>> {
         let _import_addr = base_addr + import_rva as u64;
         let mut imports = Vec::new();
@@ -356,10 +397,17 @@ impl PeParser {
             if thunk_data > 0 {
                 let thunk_addr = base_addr + thunk_data as u64;
                 let mut thunk_index = 0;
+                // IMAGE_THUNK_DATA 在 64 位 PE 中为 8 字节，32 位为 4 字节
+                let thunk_size = if is_64bit { 8usize } else { 4usize };
+                // 防御上限：避免损坏的导入表导致无限越界读取
+                const MAX_THUNKS: usize = 65536;
 
-                loop {
-                    let entry_addr = thunk_addr + thunk_index * 4;
-                    let entry_data = scanner.dump_region(entry_addr, 4)?;
+                while thunk_index < MAX_THUNKS {
+                    let entry_addr = thunk_addr + (thunk_index as u64) * thunk_size as u64;
+                    let entry_data = match scanner.dump_region(entry_addr, thunk_size) {
+                        Ok(data) => data,
+                        Err(_) => break, // 越界视为导入表结束
+                    };
                     let entry = u32::from_le_bytes([
                         entry_data[0], entry_data[1], entry_data[2], entry_data[3],
                     ]);
@@ -406,8 +454,12 @@ impl PeParser {
     /// 查找符号
     #[cfg(windows)]
     pub fn find_symbol(&self, module_name: &str, symbol_name: &str) -> Option<&PeSymbol> {
-        self.modules.get(module_name)?.exports.iter()
-            .find(|s| s.name == symbol_name || s.name.contains(symbol_name))
+        let exports = &self.modules.get(module_name)?.exports;
+        // 精确匹配优先，避免 contains 误匹配到包含目标名的其他符号
+        exports
+            .iter()
+            .find(|s| s.name == symbol_name)
+            .or_else(|| exports.iter().find(|s| s.name.contains(symbol_name)))
     }
 
     /// 列出所有导出符号
@@ -451,5 +503,24 @@ mod tests {
     fn test_pe_parser_creation() {
         let parser = PeParser::new(0);
         assert!(parser.modules.is_empty());
+    }
+
+    /// Windows 端到端测试：解析当前进程 kernel32.dll 的导出表
+    #[cfg(windows)]
+    #[test]
+    fn test_kernel32_export_resolution() {
+        let pid = unsafe { winapi::um::processthreadsapi::GetCurrentProcessId() };
+        let mut parser = PeParser::new(pid);
+        let info = parser
+            .parse_module("kernel32.dll")
+            .expect("解析 kernel32.dll 失败");
+        assert!(!info.exports.is_empty(), "kernel32.dll 应包含导出符号");
+        assert!(info.exports.len() > 100, "kernel32.dll 导出符号数量异常: {}", info.exports.len());
+        assert!(info.size > 0, "模块大小应从节表解析出来，实际为 0");
+
+        let symbol = parser
+            .find_symbol("kernel32.dll", "GetCurrentProcessId")
+            .expect("应能解析 GetCurrentProcessId");
+        assert!(symbol.address > 0, "符号地址应大于 0");
     }
 }
