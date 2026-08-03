@@ -67,6 +67,10 @@ impl WinMemoryScanner {
         let regions = self.parse_regions()?;
         let mut matches = Vec::new();
 
+        // 单次读取上限，避免一次性读取超大区域（块间重叠防止跨块漏检）
+        const CHUNK_SIZE: usize = 16 * 1024 * 1024;
+        let overlap = pattern.len() - 1;
+
         for region in regions {
             if !region.perms.read {
                 continue;
@@ -77,14 +81,22 @@ impl WinMemoryScanner {
                 continue;
             }
 
-            // 限制单次读取大小，避免读取过多内存
-            let read_size = size.min(16 * 1024 * 1024);
-            let data = match self.dump_region(region.start as u64, read_size) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
+            let mut offset = 0usize;
+            while offset < size {
+                let want = (size - offset).min(CHUNK_SIZE);
+                let data = self.dump_region_tolerant(region.start as u64 + offset as u64, want);
+                Self::find_pattern_in_data(
+                    &data,
+                    pattern,
+                    region.start as u64 + offset as u64,
+                    &mut matches,
+                );
 
-            Self::find_pattern_in_data(&data, pattern, region.start as u64, &mut matches);
+                if offset + want >= size {
+                    break;
+                }
+                offset += want - overlap;
+            }
         }
 
         log::debug!("字节模式搜索完成: {} 处匹配", matches.len());
@@ -117,6 +129,12 @@ impl WinMemoryScanner {
         };
 
         if ok == 0 {
+            if read > 0 {
+                // 部分读取：保留已读前缀数据
+                buf.truncate(read);
+                log::warn!("部分读取: 期望 {} 字节, 实际 {} 字节", size, read);
+                return Ok(buf);
+            }
             let err = std::io::Error::last_os_error();
             return Err(FridaError::MemoryRead {
                 address: start as usize,
@@ -132,6 +150,36 @@ impl WinMemoryScanner {
         }
 
         Ok(buf)
+    }
+
+    /// 宽容读取：整体读取失败或不足时，继续逐页补读剩余部分（跳过不可读页）
+    fn dump_region_tolerant(&self, start: u64, size: usize) -> Vec<u8> {
+        if size == 0 {
+            return Vec::new();
+        }
+
+        // 先尝试整体读取（可能返回部分数据）
+        let mut out = match self.dump_region(start, size) {
+            Ok(data) => data,
+            Err(_) => Vec::with_capacity(size),
+        };
+
+        // 已读满则直接返回
+        if out.len() >= size {
+            return out;
+        }
+
+        // 从已读位置继续逐页读取，不可读页以零填充，保证匹配地址与区域偏移对齐
+        let mut offset = out.len();
+        while offset < size {
+            let page = (size - offset).min(4096);
+            match self.dump_region(start + offset as u64, page) {
+                Ok(d) => out.extend_from_slice(&d),
+                Err(_) => out.extend(std::iter::repeat(0u8).take(page)),
+            }
+            offset += page;
+        }
+        out
     }
 
     /// 解析目标进程的所有内存区域
@@ -252,5 +300,22 @@ impl Drop for WinMemoryScanner {
             }
             log::debug!("WinMemoryScanner 已关闭进程句柄 PID={}", self.pid);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 端到端：在自身进程堆上放置唯一标记，验证 search_bytes 可扫描到
+    #[test]
+    fn test_search_bytes_finds_marker_in_self() {
+        let marker: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0xDE, 0x13, 0x37, 0x99];
+        std::hint::black_box(&marker);
+
+        let pid = crate::common::util::current_process_id().0;
+        let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
+        let matches = scanner.search_bytes(&marker).expect("搜索失败");
+        assert!(!matches.is_empty(), "应在自身进程堆中找到标记");
     }
 }

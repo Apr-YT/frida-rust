@@ -532,9 +532,27 @@ fn register_apis(
     }
     #[cfg(windows)]
     {
-        engine.register_fn("search_bytes", |_pattern: rhai::Array| -> rhai::Array {
-            log::warn!("[脚本] search_bytes 在 Windows 下暂未实现");
-            rhai::Array::new()
+        let sb_pid = target_pid;
+        engine.register_fn("search_bytes", move |pattern: rhai::Array| -> rhai::Array {
+            let pattern_vec: Vec<u8> = pattern.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
+            if pattern_vec.is_empty() {
+                return rhai::Array::new();
+            }
+            // 自身进程（pid=0）映射为当前进程 ID
+            let scan_pid = if sb_pid == 0 {
+                crate::common::util::current_process_id().0
+            } else {
+                sb_pid
+            };
+            match crate::memory::win_scanner::WinMemoryScanner::new(scan_pid)
+                .and_then(|s| s.search_bytes(&pattern_vec))
+            {
+                Ok(addrs) => addrs.iter().map(|&a| rhai::Dynamic::from_int(a as i64)).collect(),
+                Err(e) => {
+                    log::warn!("[脚本] search_bytes 失败: {}", e);
+                    rhai::Array::new()
+                }
+            }
         });
     }
 
@@ -762,5 +780,25 @@ mod tests {
         for thread in threads {
             thread.join().expect("工作线程异常退出");
         }
+    }
+
+    /// Windows：search_bytes 脚本函数可扫描自身进程堆中的标记
+    #[cfg(windows)]
+    #[test]
+    fn test_search_bytes_script_windows() {
+        let marker: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0xDE, 0x13, 0x37, 0x99];
+        std::hint::black_box(&marker);
+
+        let mut engine = ScriptEngine::new().unwrap();
+        let pattern = marker
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+        let result = engine
+            .execute_text(&format!("search_bytes([{}])", pattern))
+            .expect("search_bytes 脚本执行失败");
+        let arr: rhai::Array = result.value.try_cast().expect("应返回数组");
+        assert!(!arr.is_empty(), "应在自身进程堆中找到标记");
     }
 }
