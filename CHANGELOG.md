@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- 脚本引擎并发执行支持
+  - 开启 Rhai `sync` 特性，`ScriptEngine` 支持跨线程传递（`Send + Sync`）
+  - 新增线程安全句柄 `ScriptEngineHandle`（`Send + Clone`，互斥串行化）
+  - 脚本侧 `log_info`/`log_warn` 写入执行结果日志
+- MCP 脚本执行工具
+  - `run_script` - 执行 Rhai 脚本（源码或文件路径，按 PID 缓存引擎）
+  - `script_reset` - 重置脚本引擎
+- Windows 字节搜索支持
+  - 脚本引擎 `search_bytes` 落地 Windows 实现
+  - `WinMemoryScanner` 分块滑动扫描，宽容处理并发读取
+
+### Fixed
+- MCP `memory_write` 在 Windows 下未实际写入的问题
+- `WinMemoryScanner` 在并发堆操作下 `ReadProcessMemory` 部分失败导致漏检
+
 ## [0.35.0] - 2026-07-12
 
 ### Added
