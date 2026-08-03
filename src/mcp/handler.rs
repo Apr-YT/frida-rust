@@ -257,6 +257,10 @@ impl FridaMcpServer {
                 crate::common::util::safe_write_bytes(ProcessId(p.pid), addr, &data)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
             }
+            #[cfg(windows)] {
+                crate::common::util::safe_write_bytes(ProcessId(p.pid), addr, &data)
+                    .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+            }
             Ok(format!("已写入 {} 字节到 {:#x}", data.len(), addr))
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }

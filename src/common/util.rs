@@ -639,4 +639,16 @@ mod tests {
         let pid = current_process_id();
         assert!(pid.0 > 0);
     }
+
+    /// Windows：向自身进程写入并回读验证（WriteProcessMemory 路径）
+    #[cfg(windows)]
+    #[test]
+    fn test_safe_write_bytes_windows() {
+        let mut buf = vec![0u8; 64];
+        let pid = current_process_id();
+        let data = [0xAAu8, 0xBB, 0xCC, 0xDD];
+
+        safe_write_bytes(pid, buf.as_ptr() as usize, &data).expect("写入失败");
+        assert_eq!(&buf[..data.len()], &data, "写入后应能回读一致");
+    }
 }
