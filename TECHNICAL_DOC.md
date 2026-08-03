@@ -1,7 +1,7 @@
 # frida-rust 技术文档
 
 > Frida 核心功能的 Rust 实现 —— 动态插桩与逆向工程框架
-> 版本：v0.35.0 | 平台：Linux / Android / Windows
+> 版本：v0.35.0 | 目标平台：Android（AArch64, root）| 主机侧：Windows / Linux / macOS 控制面
 
 ---
 
@@ -13,6 +13,7 @@
 4. [编译流程](#4-编译流程)
 5. [部署流程](#5-部署流程)
 6. [使用说明](#6-使用说明)
+7. [架构演进路线图](#7-架构演进路线图)
 
 ---
 
@@ -30,24 +31,27 @@ frida-rust 是用 Rust 从零实现的动态插桩框架，对标 Frida 的核�
 | `script` | 基于 Rhai 的脚本引擎，可编程 Hook 和内存操作 |
 | `anti_detect` | 绕过进程检测、Frida 特征擦除、调试器隐藏 |
 | `communication` | 控制端与 Agent 之间的安全双向通信 |
+| `android` | adb 设备直连（设备发现/进程/包/logcat）与设备端 frida-server 通信 |
 
-### 平台支持
+### 平台定位（v0.35+）
 
-| 功能 | Linux x86_64 | Linux AArch64 | Android AArch64 | Windows x86_64 |
-|---|:---:|:---:|:---:|:---:|
-| Inline Hook | ✅ | ✅ | ✅ | ✅ |
-| GOT/PLT Hook | ✅ | ✅ | ✅ | — |
-| IAT Hook | — | — | — | ✅ |
-| Java Hook | — | — | ✅ | — |
-| ptrace 注入 | ✅ | ✅ | ✅ | — |
-| Zygote 注入 | — | — | ✅ | — |
-| 反射注入 | ✅ | ✅ | ✅ | — |
-| CreateRemoteThread 注入 | — | — | — | ✅ |
-| /proc 反检测 | ✅ | ✅ | ✅ | — |
-| PEB 反检测 | — | — | — | ✅ |
-| Unix Socket IPC | ✅ | ✅ | ✅ | — |
-| NamedPipe IPC | — | — | — | ✅ |
-| Rhai 脚本 | ✅ | ✅ | ✅ | ✅ |
+目标平台收敛为 **Android（AArch64, root）**；主机侧（Windows / Linux / macOS）仅作为控制面，
+通过 adb 操作设备。旧的 Linux/Windows 本机注入模型不再是主线，Windows 专属代码按路线图清理。
+
+| 能力 | Android AArch64 | 状态 |
+|---|:---:|---|
+| adb 设备直连 | ✅ | v0.35 已落地 |
+| frida-server 守护进程（socket 命令分发） | ✅ | v0.35 已落地 |
+| ptrace 注入 | ✅ | 已有实现，P1 接入链路 |
+| Zygote 注入 | ✅ | 已有实现，P1 接入链路 |
+| Inline Hook（native） | ✅ | 已有实现，P2 下沉 Agent |
+| Java Hook（JNI） | ✅ | 已有实现，P2 下沉 Agent |
+| GOT/PLT Hook | ✅ | 已有实现，P2 下沉 Agent |
+| Rhai 脚本引擎 | ✅ | 已有实现，P2 下沉 Agent |
+| /proc 反检测 | ✅ | 已有实现，P3 收敛为 Profile |
+
+> Windows 侧能力（win_inject / win_reflect / win_hide / win_scanner / iat_hook 等）
+> 在 P4 清理前保留，以维持现有测试与 MCP 工具可用性。
 
 ---
 
@@ -112,6 +116,17 @@ frida-rust/
 │       ├── channel.rs       # 传输通道（Unix Socket / Stdio / 共享内存）
 │       ├── server.rs        # 通信服务端
 │       └── win_channel.rs   # Windows NamedPipe 通道
+│   │
+│   ├── android/            # Android 设备支持（主机侧）
+│   │   ├── adb.rs          # adb 封装（设备发现/shell/push/forward）
+│   │   ├── device.rs       # 设备客户端（设备信息/进程/包/logcat）
+│   │   ├── daemon.rs       # frida-server 帧协议客户端（长度前缀 JSON）
+│   │   ├── dex.rs          # DEX 文件解析
+│   │   └── mod.rs
+
+crates/
+├── frida-agent/        # 注入目标进程的 Agent 共享库（Android）
+└── frida-server/       # 设备端守护进程（root，abstract socket 命令分发）
 ```
 
 ### 2.2 分层架构
@@ -143,6 +158,9 @@ frida-rust/
 | `#[cfg(windows)]` | 仅在 Windows 编译（IAT、PEB、NamedPipe 等） |
 | `#[cfg(target_arch = "aarch64")]` | AArch64 专用代码路径（指令解码） |
 | `#[cfg(target_arch = "x86_64")]` | x86_64 专用代码路径（指令解码） |
+
+> 注：目标平台已收敛为 Android；Windows 专属模块（win_*）在 P4 前保留，之后移除。
+
 
 ### 2.4 错误处理
 
@@ -564,24 +582,23 @@ chmod +x /usr/local/bin/frida-rust
 frida-rust --version
 ```
 
-### 5.2 Android 部署
+### 5.2 Android 部署（v0.35+：主机 + 设备端守护进程）
+
+目标平台为 Android：主机侧运行 MCP/CLI（任意 OS），设备端运行 frida-server。
 
 ```bash
-# 1. 编译（需要 Android NDK）
-cargo build --release --target aarch64-linux-android
+# 1. 交叉编译设备端守护进程（WSL + NDK r27）
+cargo build -p frida-server --target aarch64-linux-android --release
 
-# 2. 推送到设备
-adb push target/aarch64-linux-android/release/frida-rust /data/local/tmp/
+# 2. 一键部署：编译 → 推送 /data/local/tmp → root 启动 → adb forward
+powershell -ExecutionPolicy Bypass -File scripts/deploy-frida-server.ps1
 
-# 3. 在设备上执行
-adb shell
-cd /data/local/tmp
-chmod +x frida-rust
-./frida-rust --version
-
-# 4. 注入到目标 App（需要 root）
-./frida-rust inject $(pidof com.example.app)
+# 3. 链路验证：adb forward tcp:27042 -> localabstract:frida
+#    ping / process_list / package_list 命令经守护进程返回
 ```
+
+> 设备要求：root。守护进程启动时会执行 `setenforce 0`（MIUI SELinux 限制
+> adbd 连接 su 域 socket，见 7.4）。
 
 ### 5.3 Windows 部署
 
@@ -821,6 +838,50 @@ RUST_LOG=frida_rust=debug frida-rust script hook.rhai
 # 仅输出错误
 RUST_LOG=error frida-rust attach com.example.app
 ```
+
+---
+
+## 7. 架构演进路线图
+
+### 7.1 定位
+
+目标平台收敛为 **Android（AArch64, root）**，主机侧（Windows / Linux / macOS）仅作为控制面
+（MCP / CLI / WebUI）。执行核心逐步下沉到目标进程内的 Agent，主机只做编排 ——
+这是反检测的最优形态：跨进程 syscall 最少，注入痕迹可控。
+
+### 7.2 目标架构
+
+```
+[主机] MCP / CLI / WebUI
+   │  AndroidClient（adb 封装：devices / shell / push / forward）
+   ▼
+adb forward tcp:27042 → localabstract:frida
+   ▼
+[设备] frida-server（root，长度前缀 JSON 帧命令分发）
+   │  ptrace（默认）/ zygote（隐身）注入
+   ▼
+[目标进程] Agent SO（hook / memory / script / stealth 执行核心）
+```
+
+### 7.3 路线
+
+| 阶段 | 内容 | 状态 |
+|---|---|---|
+| P0 | adb 直连 + frida-server 骨架（ping / process_list / package_list） | ✅ 已完成（v0.35） |
+| P1 | ptrace 注入 + Agent 最小执行核心（内存读写回传） | ⏳ 下一批 |
+| P2 | Agent 内 Hook（native / JNI / GOT）+ 脚本引擎 | ⬜ 规划 |
+| P3 | 反检测 Profile（TracerPid / maps / fd 隐身、syscall 直连） | ⬜ 规划 |
+| P4 | MCP 工具全量对接 + 清理 Windows 旧代码 | ⬜ 规划 |
+
+### 7.4 关键设计决策
+
+- **Agent 化执行**：内存 / hook / 脚本在目标进程内执行，主机不直接读写目标内存。
+- **传输层**：长度前缀 JSON 帧（4 字节小端长度 + JSON 负载），经 adb forward 映射
+  abstract socket，可平滑扩展注入 / hook / 脚本命令。
+- **SELinux 处理**：MIUI 限制 adbd 连接 su 域 socket（`avc: denied connectto`），
+  采用 abstract socket + `setenforce 0`（部署脚本内置）。
+- **注入链路可插拔**：ptrace（默认）与 zygote（隐身场景）作为策略，P1 统一接入。
+- **反检测生命周期化**：`analyze → plan → apply → verify → rollback`，挂在 Session 上。
 
 ---
 
