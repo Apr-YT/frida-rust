@@ -1,11 +1,11 @@
 [workspace]
-members = ["crates/frida-agent", "crates/simple-injector"]
+members = ["crates/frida-agent", "crates/frida-server", "crates/simple-injector"]
 
 [package]
 name = "frida-rust"
 version = "0.35.0"
 edition = "2021"
-description = "Frida 核心功能的 Rust 实现 - 动态插桩与逆向工程框架"
+description = "类 Frida 的逆向分析框架（Rust 自研实现）- MCP 驱动的进程/内存/Hook 分析工具集"
 license = "MIT"
 authors = ["Frida-Rust Contributors"]
 
@@ -48,7 +48,7 @@ tokio = { version = "1", features = ["full"] }
 nix = { version = "0.29", features = ["process", "signal", "socket", "fs", "mman", "ptrace"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["processthreadsapi", "memoryapi", "handleapi", "libloaderapi", "tlhelp32", "psapi", "winbase", "winnt", "synchapi", "namedpipeapi", "fileapi", "errhandlingapi", "sysinfoapi", "wow64apiset", "debugapi", "threadpoollegacyapiset", "dbghelp"] }
+winapi = { version = "0.3", features = ["processthreadsapi", "memoryapi", "handleapi", "libloaderapi", "tlhelp32", "psapi", "winbase", "winnt", "ntdef", "synchapi", "namedpipeapi", "fileapi", "errhandlingapi", "sysinfoapi", "wow64apiset", "debugapi", "threadpoollegacyapiset", "dbghelp", "profileapi"] }
 
 [profile.release]
 opt-level = 3

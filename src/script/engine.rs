@@ -517,6 +517,64 @@ fn register_apis(
         engine.register_fn("write_memory", move |_a: i64, _d: rhai::Blob| -> bool { false });
     }
 
+    // 字符串读取/写入（addr 为绝对地址；pid=0 时读取当前进程）
+    let str_pid = target_pid;
+    engine.register_fn("read_string", move |addr: i64, max_len: i64| -> String {
+        let max = if max_len <= 0 { 256 } else { max_len.min(4096) as usize };
+        let data = if str_pid == 0 {
+            let mut buf = vec![0u8; max];
+            unsafe {
+                std::ptr::copy_nonoverlapping(addr as *const u8, buf.as_mut_ptr(), max);
+            }
+            buf
+        } else {
+            #[cfg(unix)]
+            {
+                let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(str_pid));
+                match s.dump_region(addr as u64, max) {
+                    Ok(d) => d,
+                    Err(_) => return String::new(),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let s = crate::memory::win_scanner::WinMemoryScanner::new(str_pid);
+                match s.and_then(|sc| sc.dump_region(addr as u64, max)) {
+                    Ok(d) => d,
+                    Err(_) => return String::new(),
+                }
+            }
+        };
+        let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+        String::from_utf8_lossy(&data[..end]).into_owned()
+    });
+
+    engine.register_fn("write_string", move |addr: i64, text: &str| -> bool {
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return true;
+        }
+        if str_pid == 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), addr as *mut u8, bytes.len());
+                std::ptr::write((addr as *mut u8).add(bytes.len()), 0u8);
+            }
+            true
+        } else {
+            #[cfg(unix)]
+            {
+                let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(str_pid));
+                s.write_bytes(addr as u64, bytes).is_ok()
+            }
+            #[cfg(not(unix))]
+            {
+                let mut data = bytes.to_vec();
+                data.push(0);
+                crate::common::util::safe_write_bytes(ProcessId(str_pid), addr as usize, &data).is_ok()
+            }
+        }
+    });
+
     // 字节搜索 - 支持数组和 Blob 两种参数
     #[cfg(unix)]
     {
@@ -800,5 +858,22 @@ mod tests {
             .expect("search_bytes 脚本执行失败");
         let arr: rhai::Array = result.value.try_cast().expect("应返回数组");
         assert!(!arr.is_empty(), "应在自身进程堆中找到标记");
+    }
+
+    /// 端到端：read_string / write_string 宿主函数可读写当前进程内存
+    #[test]
+    fn test_read_write_string_api() {
+        let mut engine = ScriptEngine::new().unwrap();
+        let mut buf = vec![0u8; 64];
+        let addr = buf.as_mut_ptr() as i64;
+
+        engine
+            .execute_text(&format!("write_string({}, \"hello_script_42\")", addr))
+            .expect("write_string 失败");
+        let result = engine
+            .execute_text(&format!("read_string({}, 64)", addr))
+            .expect("read_string 失败");
+        let s: String = result.value.cast::<String>();
+        assert_eq!(s, "hello_script_42", "读回字符串应一致");
     }
 }

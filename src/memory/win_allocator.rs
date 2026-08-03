@@ -12,8 +12,9 @@ use winapi::um::memoryapi::{
 };
 use winapi::um::processthreadsapi::OpenProcess;
 use winapi::um::winnt::{
-    HANDLE, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
-    PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+    HANDLE, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE,
+    PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+    PROCESS_VM_WRITE,
 };
 
 /// Windows 远程内存分配器
@@ -235,6 +236,52 @@ impl WinRemoteAllocator {
             addr,
             size,
             exec,
+            old_prot
+        );
+        Ok(())
+    }
+
+    /// 按权限字符串修改远程内存保护属性
+    ///
+    /// # 参数
+    /// - `addr`: 内存地址
+    /// - `size`: 大小
+    /// - `perm`: 权限组合（如 `rwx`/`rx`/`rw`/`r`），映射到 `PAGE_*` 常量
+    pub fn protect_perms(&self, addr: u64, size: usize, perm: &str) -> crate::Result<()> {
+        let p = perm.to_ascii_lowercase();
+        let new_prot = if p.contains('x') {
+            if p.contains('w') {
+                PAGE_EXECUTE_READWRITE
+            } else {
+                PAGE_EXECUTE_READ
+            }
+        } else if p.contains('w') {
+            PAGE_READWRITE
+        } else if p.contains('r') {
+            PAGE_READONLY
+        } else {
+            PAGE_NOACCESS
+        };
+
+        let mut old_prot = 0u32;
+        let ok = unsafe {
+            VirtualProtectEx(self.handle, addr as LPVOID, size, new_prot, &mut old_prot)
+        };
+
+        if ok == 0 {
+            let err = std::io::Error::last_os_error();
+            return Err(FridaError::MemoryProtect {
+                address: addr as usize,
+                reason: format!("VirtualProtectEx 失败: {}", err),
+            }
+            .into());
+        }
+
+        log::debug!(
+            "VirtualProtectEx(perms) 成功: addr={:#x}, size={}, perm={}, old_prot={:#x}",
+            addr,
+            size,
+            perm,
             old_prot
         );
         Ok(())

@@ -32,6 +32,8 @@ pub mod zygote_inject;
 pub mod win_inject;
 #[cfg(windows)]
 pub mod win_process;
+#[cfg(windows)]
+pub mod win_reflect;
 
 // 重新导出主要接口
 #[cfg(unix)]
@@ -91,4 +93,127 @@ pub fn attach_process(pid: crate::common::types::ProcessId) -> Result<(), crate:
         pid: pid.0,
         source: None,
     })
+}
+
+/// 暂停目标进程（Unix: SIGSTOP）
+#[cfg(unix)]
+pub fn suspend_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    let ret = unsafe { libc::kill(pid.0 as libc::pid_t, libc::SIGSTOP) };
+    if ret != 0 {
+        return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+    }
+    Ok(())
+}
+
+/// 暂停目标进程（Windows: NtSuspendProcess）
+#[cfg(windows)]
+pub fn suspend_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    unsafe {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{HANDLE, PROCESS_SUSPEND_RESUME};
+
+        let handle = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid.0);
+        if handle.is_null() {
+            return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+        }
+
+        let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr() as *const i8);
+        if ntdll.is_null() {
+            CloseHandle(handle);
+            return Err(crate::FridaError::Other("无法加载 ntdll.dll".into()).into());
+        }
+        let proc = GetProcAddress(ntdll, b"NtSuspendProcess\0".as_ptr() as *const i8);
+        if proc.is_null() {
+            CloseHandle(handle);
+            return Err(crate::FridaError::Other("找不到 NtSuspendProcess".into()).into());
+        }
+
+        type NtSuspendProcess = unsafe extern "system" fn(HANDLE) -> i32;
+        let func: NtSuspendProcess = std::mem::transmute(proc);
+        let status = func(handle);
+        CloseHandle(handle);
+        if status < 0 {
+            return Err(crate::FridaError::Other(format!("NtSuspendProcess 失败: status {:#x}", status)).into());
+        }
+    }
+    Ok(())
+}
+
+/// 恢复已暂停的进程（Unix: SIGCONT）
+#[cfg(unix)]
+pub fn resume_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    let ret = unsafe { libc::kill(pid.0 as libc::pid_t, libc::SIGCONT) };
+    if ret != 0 {
+        return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+    }
+    Ok(())
+}
+
+/// 恢复已暂停的进程（Windows: NtResumeProcess）
+#[cfg(windows)]
+pub fn resume_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    unsafe {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{HANDLE, PROCESS_SUSPEND_RESUME};
+
+        let handle = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid.0);
+        if handle.is_null() {
+            return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+        }
+
+        let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr() as *const i8);
+        if ntdll.is_null() {
+            CloseHandle(handle);
+            return Err(crate::FridaError::Other("无法加载 ntdll.dll".into()).into());
+        }
+        let proc = GetProcAddress(ntdll, b"NtResumeProcess\0".as_ptr() as *const i8);
+        if proc.is_null() {
+            CloseHandle(handle);
+            return Err(crate::FridaError::Other("找不到 NtResumeProcess".into()).into());
+        }
+
+        type NtResumeProcess = unsafe extern "system" fn(HANDLE) -> i32;
+        let func: NtResumeProcess = std::mem::transmute(proc);
+        let status = func(handle);
+        CloseHandle(handle);
+        if status < 0 {
+            return Err(crate::FridaError::Other(format!("NtResumeProcess 失败: status {:#x}", status)).into());
+        }
+    }
+    Ok(())
+}
+
+/// 终止目标进程（Unix: SIGKILL）
+#[cfg(unix)]
+pub fn kill_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    let ret = unsafe { libc::kill(pid.0 as libc::pid_t, libc::SIGKILL) };
+    if ret != 0 {
+        return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+    }
+    Ok(())
+}
+
+/// 终止目标进程（Windows: TerminateProcess）
+#[cfg(windows)]
+pub fn kill_process(pid: crate::common::types::ProcessId) -> Result<(), crate::FridaError> {
+    unsafe {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::{OpenProcess, TerminateProcess};
+        use winapi::um::winnt::PROCESS_TERMINATE;
+
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid.0);
+        if handle.is_null() {
+            return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+        }
+        let ret = TerminateProcess(handle, 1);
+        CloseHandle(handle);
+        if ret == 0 {
+            return Err(crate::FridaError::Io(std::io::Error::last_os_error()).into());
+        }
+    }
+    Ok(())
 }

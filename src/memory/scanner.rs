@@ -78,7 +78,7 @@ impl MemoryScanner {
         Ok(())
     }
 
-    fn readable_regions(&mut self) -> Result<Vec<MemoryRegion>> {
+    pub fn readable_regions(&mut self) -> Result<Vec<MemoryRegion>> {
         self.ensure_regions()?;
         Ok(self
             .regions
@@ -94,7 +94,7 @@ impl MemoryScanner {
         search_regions: Option<&[MemoryRegion]>,
     ) -> Result<Vec<u64>> {
         let wildcard: Vec<Option<u8>> = pattern.iter().map(|b| Some(*b)).collect();
-        self.search_wildcard(&wildcard, search_regions)
+        self.search_wildcard(&wildcard, search_regions, None)
     }
 
     /// 搜索字节模式（支持 `??` 通配符，`None` 表示任意字节）
@@ -102,6 +102,7 @@ impl MemoryScanner {
         &mut self,
         pattern: &[Option<u8>],
         search_regions: Option<&[MemoryRegion]>,
+        max: Option<usize>,
     ) -> Result<Vec<u64>> {
         if pattern.is_empty() || pattern.iter().all(|p| p.is_none()) {
             return Ok(Vec::new());
@@ -131,7 +132,12 @@ impl MemoryScanner {
                 Err(_) => continue,
             };
 
-            self.find_wildcard_in_data(&data, pattern, region.start as u64, &mut matches);
+            self.find_wildcard_in_data(&data, pattern, region.start as u64, &mut matches, max);
+            if let Some(m) = max {
+                if matches.len() >= m {
+                    break;
+                }
+            }
         }
 
         log::debug!("字节模式搜索完成: {} 处匹配", matches.len());
@@ -152,7 +158,7 @@ impl MemoryScanner {
         search_regions: Option<&[MemoryRegion]>,
     ) -> Result<Vec<u64>> {
         let wildcard = crate::common::util::parse_hex_pattern(pattern)?;
-        self.search_wildcard(&wildcard, search_regions)
+        self.search_wildcard(&wildcard, search_regions, None)
     }
 
     pub fn dump_region(&mut self, start: u64, size: usize) -> Result<Vec<u8>> {
@@ -344,6 +350,7 @@ impl MemoryScanner {
         pattern: &[Option<u8>],
         base_addr: u64,
         matches: &mut Vec<u64>,
+        max: Option<usize>,
     ) {
         if data.len() < pattern.len() {
             return;
@@ -362,6 +369,11 @@ impl MemoryScanner {
             }
             if found {
                 matches.push(base_addr + idx as u64);
+                if let Some(m) = max {
+                    if matches.len() >= m {
+                        return;
+                    }
+                }
                 idx += pattern.len();
                 continue;
             }
@@ -488,7 +500,7 @@ mod tests {
         let data = b"\x48\x8B\x05\x00\x00\x00\x00\x48\x83";
         let pattern = vec![Some(0x48), Some(0x8B), None, Some(0x00), Some(0x00)];
         let mut matches = Vec::new();
-        scanner.find_wildcard_in_data(data, &pattern, 0x1000, &mut matches);
+        scanner.find_wildcard_in_data(data, &pattern, 0x1000, &mut matches, None);
         assert_eq!(matches, vec![0x1000]);
     }
 
@@ -499,7 +511,7 @@ mod tests {
         let data = b"\x48\x8B\x05\x00\x00";
         let pattern = vec![Some(0x90), None, Some(0x90)];
         let mut matches = Vec::new();
-        scanner.find_wildcard_in_data(data, &pattern, 0x2000, &mut matches);
+        scanner.find_wildcard_in_data(data, &pattern, 0x2000, &mut matches, None);
         assert!(matches.is_empty());
     }
 }

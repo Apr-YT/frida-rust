@@ -241,3 +241,76 @@ pub fn get_process_info(pid: u32) -> crate::Result<ProcessInfo> {
 
     Ok(info)
 }
+
+/// 获取进程内存统计（工作集/私有提交/峰值）
+///
+/// 通过 `OpenProcess` + `GetProcessMemoryInfo` 获取：
+/// - 常驻内存: `WorkingSetSize`
+/// - 私有提交: `PagefileUsage`
+/// - 虚拟内存: `PrivateUsage`
+/// - 峰值常驻: `PeakWorkingSetSize`
+///
+/// # 参数
+/// - `pid`: 目标进程 ID
+pub fn get_memory_stats(pid: u32) -> crate::Result<crate::common::types::MemoryStats> {
+    use winapi::um::psapi::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+
+    let handle = unsafe {
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid)
+    };
+    if handle.is_null() {
+        let err = std::io::Error::last_os_error();
+        return Err(FridaError::NotFound {
+            reason: format!("OpenProcess 失败: {}", err),
+        }
+        .into());
+    }
+
+    let mut counters: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            handle,
+            &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut _,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    unsafe {
+        CloseHandle(handle);
+    }
+    if ok == 0 {
+        let err = std::io::Error::last_os_error();
+        return Err(FridaError::NotFound {
+            reason: format!("GetProcessMemoryInfo 失败: {}", err),
+        }
+        .into());
+    }
+
+    Ok(crate::common::types::MemoryStats {
+        virtual_size: counters.PrivateUsage as u64,
+        resident_size: counters.WorkingSetSize as u64,
+        private_size: counters.PagefileUsage as u64,
+        peak_resident_size: counters.PeakWorkingSetSize as u64,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inject::{kill_process, resume_process, suspend_process};
+
+    /// 端到端：对子进程执行暂停/恢复/终止
+    #[test]
+    fn test_suspend_resume_kill_child() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/c", "ping -n 60 127.0.0.1 >nul"])
+            .spawn()
+            .expect("启动子进程失败");
+        let pid = ProcessId(child.id());
+
+        suspend_process(pid).expect("暂停失败");
+        resume_process(pid).expect("恢复失败");
+        kill_process(pid).expect("终止失败");
+
+        let _ = child.wait();
+    }
+}

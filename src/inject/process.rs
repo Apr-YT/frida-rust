@@ -343,6 +343,144 @@ pub fn find_symbol_addr(pid: ProcessId, symbol_name: &str) -> crate::Result<Opti
     Ok(None)
 }
 
+/// 获取进程内存统计（虚拟/常驻/私有/峰值）
+///
+/// 解析 `/proc/[pid]/status` 中的 `VmSize`/`VmRSS`/`VmData`/`VmStk`/`VmHWM` 字段：
+/// - 虚拟内存: `VmSize`
+/// - 常驻内存: `VmRSS`
+/// - 私有内存: `VmData + VmStk`（近似）
+/// - 峰值常驻: `VmHWM`
+///
+/// # 参数
+/// - `pid`: 目标进程 ID（`0` 表示当前进程）
+pub fn get_memory_stats(pid: ProcessId) -> crate::Result<crate::common::types::MemoryStats> {
+    let status_path = if pid.0 == 0 {
+        "/proc/self/status".to_string()
+    } else {
+        format!("/proc/{}/status", pid.0)
+    };
+    let content = std::fs::read_to_string(&status_path)?;
+
+    let mut vm_size = 0u64;
+    let mut vm_rss = 0u64;
+    let mut vm_data = 0u64;
+    let mut vm_stk = 0u64;
+    let mut vm_hwm = 0u64;
+
+    for line in content.lines() {
+        let mut parts = line.split(':');
+        let key = parts.next().unwrap_or("").trim();
+        let val = parts.next().unwrap_or("").trim();
+        let kb: u64 = val
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        match key {
+            "VmSize" => vm_size = kb,
+            "VmRSS" => vm_rss = kb,
+            "VmData" => vm_data = kb,
+            "VmStk" => vm_stk = kb,
+            "VmHWM" => vm_hwm = kb,
+            _ => {}
+        }
+    }
+
+    Ok(crate::common::types::MemoryStats {
+        virtual_size: vm_size * 1024,
+        resident_size: vm_rss * 1024,
+        private_size: (vm_data + vm_stk) * 1024,
+        peak_resident_size: vm_hwm * 1024,
+    })
+}
+
+/// 目标进程基础信息（Unix 跨进程反调试分析）
+#[derive(Debug, Clone, Default)]
+pub struct ProcTargetInfo {
+    /// 进程状态（R/S/D/Z/T）
+    pub state: String,
+    /// TracerPid（非 0 表示被 ptrace 附加）
+    pub tracer_pid: u32,
+    /// Seccomp 模式（0=未启用, 1=strict, 2=filter）
+    pub seccomp: String,
+    /// NoNewPrivs
+    pub no_new_privs: u32,
+    /// 父进程 PID
+    pub ppid: u32,
+    /// LD_PRELOAD / LD_LIBRARY_PATH 等敏感环境变量
+    pub preloads: Vec<String>,
+}
+
+/// 解析 `/proc/[pid]/status` 中的关键字段（纯函数，便于单元测试）
+fn parse_proc_status(content: &str) -> ProcTargetInfo {
+    let mut info = ProcTargetInfo::default();
+    for line in content.lines() {
+        let mut parts = line.split(':');
+        let key = parts.next().unwrap_or("").trim();
+        let val = parts.next().unwrap_or("").trim();
+        match key {
+            "State" => info.state = val.to_string(),
+            "TracerPid" => info.tracer_pid = val.parse().unwrap_or(0),
+            "Seccomp" => info.seccomp = val.to_string(),
+            "NoNewPrivs" => info.no_new_privs = val.parse().unwrap_or(0),
+            "PPid" => info.ppid = val.parse().unwrap_or(0),
+            _ => {}
+        }
+    }
+    info
+}
+
+/// 从 `/proc/[pid]/environ` 字节中提取加载器注入相关的环境变量（纯函数）
+fn parse_env_preloads(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).to_string())
+        .filter(|v| {
+            v.starts_with("LD_PRELOAD")
+                || v.starts_with("LD_LIBRARY_PATH")
+                || v.starts_with("LD_AUDIT")
+                || v.starts_with("LD_DEBUG")
+        })
+        .collect()
+}
+
+/// 读取目标进程 `/proc/[pid]/status` 与 `/proc/[pid]/environ` 的关键字段
+///
+/// 用于跨进程反调试分析（TracerPid / Seccomp / 环境变量预加载等）。
+pub fn read_proc_target_info(pid: ProcessId) -> crate::Result<ProcTargetInfo> {
+    let status_path = if pid.0 == 0 {
+        "/proc/self/status".to_string()
+    } else {
+        format!("/proc/{}/status", pid.0)
+    };
+    let environ_path = if pid.0 == 0 {
+        "/proc/self/environ".to_string()
+    } else {
+        format!("/proc/{}/environ", pid.0)
+    };
+
+    let status_content = std::fs::read_to_string(&status_path)?;
+    let mut info = parse_proc_status(&status_content);
+
+    // 环境变量中的加载器注入痕迹
+    if let Ok(bytes) = std::fs::read(&environ_path) {
+        info.preloads = parse_env_preloads(&bytes);
+    }
+
+    Ok(info)
+}
+
+/// 读取进程名称（`/proc/[pid]/comm`）
+pub fn get_process_comm(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    std::fs::read_to_string(format!("/proc/{}/comm", pid))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
 /// 读取进程的命令行参数
 ///
 /// 解析 `/proc/[pid]/cmdline` 文件，该文件中参数以 null 字节分隔。
@@ -447,5 +585,34 @@ mod tests {
         let info = get_process_info(pid).unwrap();
         let result = find_process_by_name(&info.name).unwrap();
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_parse_proc_status_fields() {
+        let content = "Name:\tgame\nState:\tS (sleeping)\nTracerPid:\t1234\nPPid:\t1\nSeccomp:\t2\nNoNewPrivs:\t1\n";
+        let info = parse_proc_status(content);
+        assert_eq!(info.state, "S (sleeping)");
+        assert_eq!(info.tracer_pid, 1234);
+        assert_eq!(info.ppid, 1);
+        assert_eq!(info.seccomp, "2");
+        assert_eq!(info.no_new_privs, 1);
+    }
+
+    #[test]
+    fn test_parse_proc_status_clean() {
+        let content = "Name:\tgame\nState:\tR (running)\nTracerPid:\t0\nSeccomp:\t0\nNoNewPrivs:\t0\n";
+        let info = parse_proc_status(content);
+        assert_eq!(info.tracer_pid, 0);
+        assert_eq!(info.state, "R (running)");
+        assert!(info.preloads.is_empty());
+    }
+
+    #[test]
+    fn test_parse_env_preloads() {
+        let bytes = b"PATH=/usr/bin\0LD_PRELOAD=/tmp/libinject.so\0HOME=/root\0LD_DEBUG=all\0";
+        let preloads = parse_env_preloads(bytes);
+        assert_eq!(preloads.len(), 2);
+        assert!(preloads.iter().any(|v| v.starts_with("LD_PRELOAD")));
+        assert!(preloads.iter().any(|v| v.starts_with("LD_DEBUG")));
     }
 }

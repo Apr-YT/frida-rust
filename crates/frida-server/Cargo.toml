@@ -1,0 +1,19 @@
+[package]
+name = "frida-server"
+version = "0.1.0"
+edition = "2021"
+description = "Android 设备端守护进程: 监听 Unix socket, 提供注入/hook/脚本命令分发"
+
+[dependencies]
+libc = "0.2"
+serde_json = "1.0"
+
+[[bin]]
+name = "frida-server"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

@@ -115,6 +115,19 @@ impl fmt::Display for ModuleInfo {
     }
 }
 
+/// 进程内存统计
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct MemoryStats {
+    /// 虚拟内存总量（字节）
+    pub virtual_size: u64,
+    /// 常驻内存（工作集，字节）
+    pub resident_size: u64,
+    /// 私有提交内存（字节）
+    pub private_size: u64,
+    /// 峰值常驻内存（字节）
+    pub peak_resident_size: u64,
+}
+
 /// 符号信息
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolInfo {

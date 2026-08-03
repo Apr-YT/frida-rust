@@ -55,7 +55,7 @@ impl WinMemoryScanner {
     /// 兼容旧调用：将固定字节模式包装为 `Option<u8>` 后委托给 [`Self::search_pattern`]。
     pub fn search_bytes(&self, pattern: &[u8]) -> crate::Result<Vec<u64>> {
         let pattern: Vec<Option<u8>> = pattern.iter().map(|b| Some(*b)).collect();
-        self.search_pattern(&pattern)
+        self.search_pattern(&pattern, None, None)
     }
 
     /// 搜索内存中的字节模式（`None` 为通配符，匹配任意字节）
@@ -67,7 +67,7 @@ impl WinMemoryScanner {
     ///
     /// # 返回值
     /// 返回所有匹配的地址列表
-    pub fn search_pattern(&self, pattern: &[Option<u8>]) -> crate::Result<Vec<u64>> {
+    pub fn search_pattern(&self, pattern: &[Option<u8>], max: Option<usize>, range: Option<(u64, u64)>) -> crate::Result<Vec<u64>> {
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
@@ -84,7 +84,18 @@ impl WinMemoryScanner {
                 continue;
             }
 
-            let size = region.size();
+            // 计算实际扫描区间（按 range 裁剪区域）
+            let r_start = region.start as u64;
+            let r_end = region.end as u64;
+            let (scan_start, scan_end) = match range {
+                Some((sa, ea)) => (r_start.max(sa), r_end.min(ea)),
+                None => (r_start, r_end),
+            };
+            if scan_start >= scan_end {
+                continue;
+            }
+
+            let size = (scan_end - scan_start) as usize;
             if size < pattern.len() {
                 continue;
             }
@@ -92,18 +103,24 @@ impl WinMemoryScanner {
             let mut offset = 0usize;
             while offset < size {
                 let want = (size - offset).min(CHUNK_SIZE);
-                let data = self.dump_region_tolerant(region.start as u64 + offset as u64, want);
+                let data = self.dump_region_tolerant(scan_start + offset as u64, want);
                 Self::find_wildcard_in_data(
                     &data,
                     pattern,
-                    region.start as u64 + offset as u64,
+                    scan_start + offset as u64,
                     &mut matches,
+                    max,
                 );
 
                 if offset + want >= size {
                     break;
                 }
                 offset += want - overlap;
+            }
+            if let Some(m) = max {
+                if matches.len() >= m {
+                    break;
+                }
             }
         }
 
@@ -271,6 +288,7 @@ impl WinMemoryScanner {
         pattern: &[Option<u8>],
         base_addr: u64,
         matches: &mut Vec<u64>,
+        max: Option<usize>,
     ) {
         if data.len() < pattern.len() {
             return;
@@ -289,6 +307,11 @@ impl WinMemoryScanner {
             }
             if found {
                 matches.push(base_addr + idx as u64);
+                if let Some(m) = max {
+                    if matches.len() >= m {
+                        return;
+                    }
+                }
                 idx += pattern.len();
                 continue;
             }
@@ -345,7 +368,90 @@ mod tests {
 
         let pid = crate::common::util::current_process_id().0;
         let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
-        let matches = scanner.search_pattern(&pattern).expect("搜索失败");
+        let matches = scanner.search_pattern(&pattern, None, None).expect("搜索失败");
         assert!(!matches.is_empty(), "应在自身进程堆中找到通配符模式");
+    }
+
+    /// 端到端：验证自身进程的内存区域枚举可用
+    #[test]
+    fn test_parse_regions_self() {
+        let pid = crate::common::util::current_process_id().0;
+        let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
+        let regions = scanner.parse_regions().expect("解析区域失败");
+        assert!(!regions.is_empty(), "自身进程应至少有一个内存区域");
+        for r in &regions {
+            assert!(r.start < r.end, "区域结束地址应大于起始地址");
+        }
+        assert!(regions.iter().any(|r| r.perms.read), "应存在可读区域");
+    }
+
+    /// 端到端：limit 上限生效，最多返回指定数量匹配
+    #[test]
+    fn test_search_pattern_limit_in_self() {
+        let marker: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0xDE, 0x13, 0x37, 0x99];
+        std::hint::black_box(&marker);
+
+        let pattern: Vec<Option<u8>> = vec![
+            Some(0xDE),
+            Some(0xAD),
+            None,
+            None,
+            None,
+            None,
+            Some(0x13),
+            Some(0x37),
+        ];
+
+        let pid = crate::common::util::current_process_id().0;
+        let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
+        let matches = scanner.search_pattern(&pattern, Some(1), None).expect("搜索失败");
+        assert!(
+            matches.len() <= 1,
+            "limit=1 时最多返回 1 个匹配, 实际 {}",
+            matches.len()
+        );
+    }
+
+    /// 端到端：range 范围过滤只返回指定区间内的匹配
+    #[test]
+    fn test_search_pattern_range_in_self() {
+        // 使用唯一 marker 模式，避免与并行测试的 marker 相互干扰
+        let marker: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33];
+        std::hint::black_box(&marker);
+
+        let pattern: Vec<Option<u8>> = vec![
+            Some(0xAA),
+            Some(0xBB),
+            None,
+            None,
+            None,
+            None,
+            Some(0x11),
+            Some(0x22),
+        ];
+
+        let pid = crate::common::util::current_process_id().0;
+        let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
+
+        // 先全量搜索拿到标记地址
+        let all = scanner.search_pattern(&pattern, None, None).expect("全量搜索失败");
+        assert!(!all.is_empty(), "应能找到标记");
+        let target = all[0];
+
+        // 用紧贴标记的区间再搜，应能命中同一地址
+        let ranged = scanner
+            .search_pattern(&pattern, None, Some((target.saturating_sub(1), target + 16)))
+            .expect("范围搜索失败");
+        assert!(ranged.contains(&target), "范围搜索应包含标记地址 {:#x}", target);
+
+        // 用完全不重叠的区间搜索，应为空
+        let far = scanner
+            .search_pattern(&pattern, None, Some((0x1, 0x1000)))
+            .expect("范围搜索失败");
+        assert!(
+            !far.contains(&target),
+            "不重叠区间不应包含标记地址 {:#x}",
+            target
+        );
     }
 }

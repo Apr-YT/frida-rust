@@ -479,6 +479,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "frida-server"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

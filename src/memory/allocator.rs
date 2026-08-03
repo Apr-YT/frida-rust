@@ -166,6 +166,21 @@ impl RemoteAllocator {
         Ok(())
     }
 
+    /// 释放远程内存（按地址+大小直接 munmap，无需本实例跟踪记录）
+    ///
+    /// 供跨调用释放场景使用（如 MCP memory_alloc/memory_free 分离调用）。
+    pub fn free_remote(&mut self, addr: u64, size: usize) -> Result<()> {
+        self.allocations.remove(&addr);
+        self.remote_munmap(addr, size)?;
+        log::info!(
+            "远程内存已释放(直接): PID {}, 地址={:#x}, 大小={}",
+            self.pid.0,
+            addr,
+            size
+        );
+        Ok(())
+    }
+
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<()> {
         log::debug!(
             "写入远程内存: PID {}, 地址={:#x}, 大小={}",

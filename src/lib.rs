@@ -1,6 +1,6 @@
 //! # frida-rust
 //!
-//! Frida 核心功能的 Rust 实现 —— 动态插桩与逆向工程框架。
+//! 类 Frida 的逆向分析框架（Rust 自研实现）—— 进程/内存/Hook 分析与脚本执行。
 //!
 //! 本库提供以下核心能力：
 //! - **进程注入** (`inject`) - 将共享库注入到目标进程中
@@ -33,7 +33,6 @@ pub mod ai_decision;
 pub mod webui;
 pub mod esp_analyzer;
 pub mod disasm;
-#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod android;
 
 // 顶层 Result 类型别名，简化返回值书写

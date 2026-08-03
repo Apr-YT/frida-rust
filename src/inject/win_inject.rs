@@ -2,6 +2,9 @@
 //!
 //! 使用 `CreateRemoteThread` + `LoadLibraryA` 实现经典的 Windows DLL 注入。
 //!
+//! 额外提供 `inject_library_hidden`：注入完成后自动从目标进程 PEB Ldr 链
+//! 摘除该模块，使其对模块枚举 / GetModuleHandle 不可见（配合模块隐藏反检测）。
+//!
 //! 注入流程：
 //! 1. `OpenProcess` 获取目标进程句柄
 //! 2. `VirtualAllocEx` 在目标进程分配内存
@@ -20,7 +23,7 @@ use winapi::shared::ntdef::NULL;
 use winapi::um::handleapi::CloseHandle;
 use winapi::um::libloaderapi::{GetModuleHandleA, GetProcAddress};
 use winapi::um::memoryapi::{VirtualAllocEx, VirtualFreeEx, WriteProcessMemory};
-use winapi::um::processthreadsapi::{CreateRemoteThread, OpenProcess};
+use winapi::um::processthreadsapi::{CreateRemoteThread, GetExitCodeThread, OpenProcess};
 use winapi::um::synchapi::WaitForSingleObject;
 use winapi::um::winnt::{HANDLE, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, PROCESS_ALL_ACCESS};
 
@@ -86,6 +89,28 @@ impl WinInjector {
     /// # 参数
     /// - `lib_path`: DLL 的完整路径
     pub fn inject_library(&self, lib_path: &str) -> crate::Result<()> {
+        self.inject_library_inner(lib_path).map(|_| ())
+    }
+
+    /// 注入 DLL 并自动隐藏（注入后从目标进程 PEB Ldr 链摘除）
+    ///
+    /// 返回注入 DLL 的基址。需要目标进程可写（`PROCESS_ALL_ACCESS`）。
+    pub fn inject_library_hidden(&self, lib_path: &str) -> crate::Result<usize> {
+        let base = self.inject_library_inner(lib_path)?;
+        crate::anti_detect::win_hide::WinStealthManager::hide_remote_module(
+            self.target_pid,
+            &format!("{:#x}", base),
+        )
+        .map_err(|e| FridaError::Inject {
+            reason: format!("DLL 注入成功但隐藏失败: {}", e),
+            pid: self.target_pid,
+            source: None,
+        })?;
+        Ok(base)
+    }
+
+    /// 注入 DLL（内部实现，返回注入 DLL 基址）
+    fn inject_library_inner(&self, lib_path: &str) -> crate::Result<usize> {
         if self.process_handle.is_null() {
             return Err(FridaError::Inject {
                 reason: "进程句柄未打开，请先调用 open_target()".to_string(),
@@ -243,6 +268,16 @@ impl WinInjector {
             log::debug!("远程线程执行完毕");
         }
 
+        // 读取远程线程退出码（LoadLibraryA 返回值 = DLL 基址）
+        let mut exit_code: DWORD = 0;
+        let base = unsafe {
+            if GetExitCodeThread(thread_handle, &mut exit_code) != 0 {
+                exit_code as usize
+            } else {
+                0
+            }
+        };
+
         // 关闭线程句柄
         unsafe {
             CloseHandle(thread_handle);
@@ -253,8 +288,16 @@ impl WinInjector {
             VirtualFreeEx(self.process_handle, remote_addr, 0, MEM_RELEASE);
         }
 
-        log::info!("DLL 注入完成: PID={}, DLL={}", self.target_pid, lib_path);
-        Ok(())
+        log::info!("DLL 注入完成: PID={}, DLL={}, base={:#x}", self.target_pid, lib_path, base);
+        if base == 0 {
+            return Err(FridaError::Inject {
+                reason: "远程线程退出码为 0（LoadLibraryA 可能失败）".to_string(),
+                pid: self.target_pid,
+                source: None,
+            }
+            .into());
+        }
+        Ok(base)
     }
 
     /// 关闭进程句柄
@@ -306,5 +349,23 @@ mod tests {
         let injector = WinInjector::new(1234);
         assert_eq!(injector.target_pid(), 1234);
         assert!(!injector.is_open());
+    }
+
+    #[test]
+    fn test_win_injector_open_missing_process() {
+        // 一个不存在的 PID 应导致 OpenProcess 失败
+        let mut injector = WinInjector::new(u32::MAX - 1);
+        let result = injector.open_target();
+        assert!(result.is_err(), "打开不存在的进程应失败: {:?}", result);
+        assert!(!injector.is_open());
+    }
+
+    #[test]
+    fn test_win_injector_inject_without_open() {
+        // 未 open_target 直接注入应报"句柄未打开"
+        let injector = WinInjector::new(1234);
+        let result = injector.inject_library("C:\\test.dll");
+        let msg = format!("{:?}", result.err());
+        assert!(msg.contains("句柄未打开"), "应提示句柄未打开: {}", msg);
     }
 }
