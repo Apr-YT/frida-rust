@@ -356,8 +356,6 @@ impl Drop for ScriptEngine {
 /// 包括日志、内存操作、Hook 管理、进程信息查询等。
 fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
     let target_pid = host_ctx.target_pid.0;
-    #[cfg(unix)]
-    let scanner = host_ctx.memory_scanner.clone();
 
     // 日志函数
     engine.register_fn("log_info", |msg: &str| {
@@ -389,9 +387,10 @@ fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
     } else {
         #[cfg(unix)]
         {
-            let s = scanner.clone();
+            let rm_pid = target_pid;
             engine.register_fn("read_memory", move |addr: i64, size: i64| -> rhai::Blob {
                 if size <= 0 || size as usize > 1024 * 1024 { return rhai::Blob::new(); }
+                let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(rm_pid));
                 match s.dump_region(addr as u64, size as usize) {
                     Ok(data) => rhai::Blob::from(data),
                     Err(e) => { log::warn!("[脚本] 跨进程 read_memory 失败: {}", e); rhai::Blob::new() }
@@ -405,12 +404,12 @@ fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
         engine.register_fn("write_memory", move |_a: i64, _d: rhai::Blob| -> bool { false });
     }
 
-    // 字节搜索
+    // 字节搜索 - 支持数组和 Blob 两种参数
     #[cfg(unix)]
     {
         let sb_pid = target_pid;
-        engine.register_fn("search_bytes", move |pattern: rhai::Blob| -> rhai::Array {
-            let pattern_vec = pattern.to_vec();
+        engine.register_fn("search_bytes", move |pattern: rhai::Array| -> rhai::Array {
+            let pattern_vec: Vec<u8> = pattern.iter().map(|v| v.as_int().unwrap_or(0) as u8).collect();
             let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(sb_pid));
             match s.search_bytes(&pattern_vec, None) {
                 Ok(addrs) => addrs.iter().map(|&a| rhai::Dynamic::from_int(a as i64)).collect(),
@@ -420,7 +419,7 @@ fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
     }
     #[cfg(windows)]
     {
-        engine.register_fn("search_bytes", |_pattern: rhai::Blob| -> rhai::Array {
+        engine.register_fn("search_bytes", |_pattern: rhai::Array| -> rhai::Array {
             log::warn!("[脚本] search_bytes 在 Windows 下暂未实现");
             rhai::Array::new()
         });
@@ -476,7 +475,7 @@ fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
                     } else {
                         #[cfg(unix)]
                         {
-                            let s = crate::memory::scanner::MemoryScanner::new(ProcessId(rd_pid));
+                            let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(rd_pid));
                             if let Ok(data) = s.dump_region(region.start as u64, size) { return rhai::Blob::from(data); }
                         }
                         return rhai::Blob::new();

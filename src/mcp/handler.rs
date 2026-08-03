@@ -207,7 +207,7 @@ impl FridaMcpServer {
             let addr = parse_hex(&p.address)?;
             if p.size > 0x100000 { return Err(McpError::invalid_params("最大 1MB", None)); }
             #[cfg(unix)] {
-                let s = crate::memory::MemoryScanner::new(ProcessId(p.pid));
+                let mut s = crate::memory::MemoryScanner::new(ProcessId(p.pid));
                 let d = s.dump_region(addr as u64, p.size)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 Ok(format_hex_dump(&d, addr))
@@ -369,7 +369,7 @@ impl FridaMcpServer {
 
             #[cfg(unix)] {
                 use crate::anti_detect::SmartStealth;
-                let mut smart = SmartStealth::new(ProcessId(p.pid));
+                let mut smart = SmartStealth::new(ProcessId(_p.pid));
                 smart.scan()
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 output.push_str(&smart.report());
@@ -603,17 +603,18 @@ impl FridaMcpServer {
     }
 
     #[tool(description = "按包名查找进程 PID")]
-    async fn android_find_pid(&self, Parameters(_p): Parameters<AndroidPackageParams>) -> Result<String, McpError> {
+    async fn android_find_pid(&self, Parameters(p): Parameters<AndroidPackageParams>) -> Result<String, McpError> {
+        let _p = p;
         tokio::task::spawn_blocking(move || {
             #[cfg(any(target_os = "linux", target_os = "android"))] {
                 use crate::android::process::get_pid_by_package;
-                let pids = get_pid_by_package(&p.package_name)
+                let pids = get_pid_by_package(&_p.package_name)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 
                 if pids.is_empty() {
-                    Ok(format!("未找到包名 '{}' 的进程", p.package_name))
+                    Ok(format!("未找到包名 '{}' 的进程", _p.package_name))
                 } else {
-                    let mut output = format!("包名 '{}' 的进程:\n", p.package_name);
+                    let mut output = format!("包名 '{}' 的进程:\n", _p.package_name);
                     for pid in pids {
                         output.push_str(&format!("  PID: {}\n", pid.0));
                     }
@@ -653,7 +654,7 @@ impl FridaMcpServer {
             #[cfg(any(target_os = "linux", target_os = "android"))] {
                 use crate::android::logcat::{get_logcat_snapshot, LogLevel};
                 
-                let level = p.level.as_deref().map(|s| match s.to_uppercase().as_str() {
+                let level = _p.level.as_deref().map(|s| match s.to_uppercase().as_str() {
                     "V" => LogLevel::Verbose,
                     "D" => LogLevel::Debug,
                     "I" => LogLevel::Info,
@@ -663,7 +664,7 @@ impl FridaMcpServer {
                     _ => LogLevel::Info,
                 });
                 
-                let entries = get_logcat_snapshot(p.tag.as_deref(), level, p.pid)
+                let entries = get_logcat_snapshot(_p.tag.as_deref(), level, _p.pid)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 
                 let mut output = format!("=== Logcat 快照 ({}) ===\n\n", entries.len());

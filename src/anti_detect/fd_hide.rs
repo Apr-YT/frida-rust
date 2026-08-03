@@ -86,12 +86,12 @@ unsafe fn set_errno(err: i32) {
 
 /// linux_dirent64 结构体（用于解析 getdents64 返回的数据）
 #[repr(C)]
-struct LinuxDirent64 {
-    d_ino: u64,        // inode 号
-    d_off: i64,        // 到下一个 dirent 的偏移
-    d_reclen: u16,     // 当前 dirent 的长度
-    d_type: u8,        // 文件类型
-    d_name: [u8; 256], // 文件名（变长，这里用最大长度）
+pub struct LinuxDirent64 {
+    pub d_ino: u64,        // inode 号
+    pub d_off: i64,        // 到下一个 dirent 的偏移
+    pub d_reclen: u16,     // 当前 dirent 的长度
+    pub d_type: u8,        // 文件类型
+    pub d_name: [u8; 256], // 文件名（变长，这里用最大长度）
 }
 
 // ======================== 替换函数 ========================
@@ -260,7 +260,7 @@ impl FdHider {
             }
         };
 
-        let mut hooker = GotPltHooker::new(libc_base as u64);
+        let mut hooker = GotPltHooker::new_with_base(libc_base as u64);
 
         // Hook openat
         let openat_addr = hooker.resolve_symbol("openat")?;

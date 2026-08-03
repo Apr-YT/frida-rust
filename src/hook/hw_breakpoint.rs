@@ -3,12 +3,13 @@
 //! 通过处理器的调试寄存器实现硬件级断点，无需修改目标指令。
 //!
 //! x86_64: 通过 PTRACE_POKEUSER 写 DR0-DR3（地址寄存器）+ DR7（控制寄存器），最多 4 个断点
-//! ARM64: 通过 PTRACE_SETREGSET + NT_ARM_HW_BREAK / NT_ARM_HW_WATCH 设置，GKI 内核默认开启
+//! ARM64: 通过 nova_stealth.ko 的 ioctl 通道由内核设置硬件调试寄存器（DBGBCR/DBGWCR）。
+//!        原因：nix 0.29 在 aarch64 未暴露 ptrace::RegSet/setregset，且内核模块已封装正确的
+//!        硬件断点/监视点编码，用户态直接操作 ptrace 反而需自行拼 user_hw_breakpoint。
 
 use crate::common::types::ProcessId;
 use crate::Result;
 use nix::sys::ptrace;
-use nix::sys::signal::Signal;
 use nix::unistd::Pid;
 use std::collections::HashMap;
 
@@ -48,6 +49,8 @@ pub struct HardwareBreakpointConfig {
 /// 硬件断点句柄
 pub struct HardwareBreakpointHandle {
     pub bp_id: u64,
+    /// 内核模块（nova_stealth.ko）返回的硬件断点 ID，用于清除
+    pub ko_bp_id: i32,
     pub config: HardwareBreakpointConfig,
     pub register_index: usize,
     pub enabled: bool,
@@ -65,7 +68,7 @@ impl HardwareBreakpointManager {
     /// 创建新的硬件断点管理器
     pub fn new(target_pid: ProcessId) -> Result<Self> {
         let max_bp = Self::get_max_breakpoints();
-        
+
         Ok(HardwareBreakpointManager {
             breakpoints: HashMap::new(),
             next_id: 1,
@@ -107,12 +110,13 @@ impl HardwareBreakpointManager {
         let bp_id = self.next_id;
         self.next_id += 1;
 
-        self.set_hw_breakpoint(&config, register_idx)?;
+        let ko_bp_id = set_hw_breakpoint(&config, register_idx)?;
 
         self.available_registers[register_idx] = false;
 
         let handle = HardwareBreakpointHandle {
             bp_id,
+            ko_bp_id,
             config: config.clone(),
             register_index: register_idx,
             enabled: true,
@@ -127,7 +131,7 @@ impl HardwareBreakpointManager {
     /// 移除硬件断点
     pub fn remove_breakpoint(&mut self, bp_id: u64) -> Result<()> {
         if let Some(handle) = self.breakpoints.remove(&bp_id) {
-            self.clear_hw_breakpoint(&handle.config, handle.register_index)?;
+            clear_hw_breakpoint(&handle.config, handle.register_index, handle.ko_bp_id)?;
             self.available_registers[handle.register_index] = true;
             log::info!("硬件断点 #{} 已移除", bp_id);
         } else {
@@ -142,7 +146,8 @@ impl HardwareBreakpointManager {
     pub fn enable_breakpoint(&mut self, bp_id: u64) -> Result<()> {
         if let Some(handle) = self.breakpoints.get_mut(&bp_id) {
             if !handle.enabled {
-                self.set_hw_breakpoint(&handle.config, handle.register_index)?;
+                let ko_bp_id = set_hw_breakpoint(&handle.config, handle.register_index)?;
+                handle.ko_bp_id = ko_bp_id;
                 handle.enabled = true;
                 log::info!("硬件断点 #{} 已启用", bp_id);
             }
@@ -158,7 +163,7 @@ impl HardwareBreakpointManager {
     pub fn disable_breakpoint(&mut self, bp_id: u64) -> Result<()> {
         if let Some(handle) = self.breakpoints.get_mut(&bp_id) {
             if handle.enabled {
-                self.clear_hw_breakpoint(&handle.config, handle.register_index)?;
+                clear_hw_breakpoint(&handle.config, handle.register_index, handle.ko_bp_id)?;
                 handle.enabled = false;
                 log::info!("硬件断点 #{} 已禁用", bp_id);
             }
@@ -170,236 +175,39 @@ impl HardwareBreakpointManager {
         Ok(())
     }
 
-    /// 设置硬件断点（x86_64）
-    #[cfg(target_arch = "x86_64")]
-    fn set_hw_breakpoint(&self, config: &HardwareBreakpointConfig, register_idx: usize) -> Result<()> {
-        let pid = Pid::from_raw(config.target_pid as i32);
-
-        let dr_registers = [
-            libc::DR0, libc::DR1, libc::DR2, libc::DR3
-        ];
-
-        let dr7_bits = [
-            (0, 1), (2, 3), (4, 5), (6, 7),
-        ];
-
-        if register_idx >= 4 {
-            return Err(crate::FridaError::LimitExceeded {
-                reason: "x86_64 最多支持 4 个硬件断点".to_string(),
-            }.into());
-        }
-
-        unsafe {
-            ptrace::pokeuser(pid, dr_registers[register_idx] as i32, config.address as *mut libc::c_void)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("写入 DR{} 失败: {}", register_idx, e),
-                })?;
-
-            let mut dr7: u64 = ptrace::peekuser(pid, libc::DR7 as i32)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("读取 DR7 失败: {}", e),
-                })? as u64;
-
-            let (len_low, len_high) = match config.length {
-                BreakpointLength::OneByte => (0b00, 0b00),
-                BreakpointLength::TwoBytes => (0b01, 0b01),
-                BreakpointLength::FourBytes => (0b11, 0b11),
-                BreakpointLength::EightBytes => (0b10, 0b10),
-            };
-
-            let (rwx_low, rwx_high) = match config.bp_type {
-                BreakpointType::Execute => (0b00, 0b00),
-                BreakpointType::Write => (0b01, 0b00),
-                BreakpointType::Read => (0b11, 0b00),
-                BreakpointType::ReadWrite => (0b11, 0b00),
-            };
-
-            let (low_bit, high_bit) = dr7_bits[register_idx];
-            
-            dr7 |= 1u64 << low_bit;
-            dr7 &= !(0b11u64 << (16 + register_idx * 2));
-            dr7 |= (len_low as u64) << (16 + register_idx * 2);
-            dr7 &= !(0b11u64 << (24 + register_idx * 2));
-            dr7 |= (rwx_low as u64) << (24 + register_idx * 2);
-
-            ptrace::pokeuser(pid, libc::DR7 as i32, dr7 as *mut libc::c_void)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("写入 DR7 失败: {}", e),
-                })?;
-        }
-
-        Ok(())
-    }
-
-    /// 设置硬件断点（ARM64）
-    #[cfg(target_arch = "aarch64")]
-    fn set_hw_breakpoint(&self, config: &HardwareBreakpointConfig, register_idx: usize) -> Result<()> {
-        use nix::sys::ptrace::AddressType;
-
-        let pid = Pid::from_raw(config.target_pid as i32);
-
-        if register_idx >= 6 {
-            return Err(crate::FridaError::LimitExceeded {
-                reason: "ARM64 最多支持 6 个硬件断点".to_string(),
-            }.into());
-        }
-
-        let mut control_value: u64 = 1u64 << (register_idx * 2);
-
-        let len_bits = match config.length {
-            BreakpointLength::OneByte => 0b00,
-            BreakpointLength::TwoBytes => 0b01,
-            BreakpointLength::FourBytes => 0b11,
-            BreakpointLength::EightBytes => 0b10,
-        };
-        control_value |= (len_bits as u64) << (register_idx * 2 + 56);
-
-        let type_bits = match config.bp_type {
-            BreakpointType::Execute => 0b00,
-            BreakpointType::Read => 0b01,
-            BreakpointType::Write => 0b10,
-            BreakpointType::ReadWrite => 0b11,
-        };
-        control_value |= (type_bits as u64) << (register_idx * 2 + 60);
-
-        unsafe {
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_BREAK,
-                &control_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("设置 NT_ARM_HW_BREAK 失败: {}", e),
-            })?;
-
-            let mut addr_value: u64 = config.address;
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_BREAK,
-                &addr_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("设置断点地址失败: {}", e),
-            })?;
-        }
-
-        Ok(())
-    }
-
-    /// 清除硬件断点（x86_64）
-    #[cfg(target_arch = "x86_64")]
-    fn clear_hw_breakpoint(&self, config: &HardwareBreakpointConfig, register_idx: usize) -> Result<()> {
-        let pid = Pid::from_raw(config.target_pid as i32);
-
-        let dr_registers = [
-            libc::DR0, libc::DR1, libc::DR2, libc::DR3
-        ];
-
-        let dr7_bits = [
-            (0, 1), (2, 3), (4, 5), (6, 7),
-        ];
-
-        unsafe {
-            ptrace::pokeuser(pid, dr_registers[register_idx] as i32, 0u64 as *mut libc::c_void)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("清除 DR{} 失败: {}", register_idx, e),
-                })?;
-
-            let mut dr7: u64 = ptrace::peekuser(pid, libc::DR7 as i32)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("读取 DR7 失败: {}", e),
-                })? as u64;
-
-            let (low_bit, _) = dr7_bits[register_idx];
-            dr7 &= !(1u64 << low_bit);
-
-            ptrace::pokeuser(pid, libc::DR7 as i32, dr7 as *mut libc::c_void)
-                .map_err(|e| crate::FridaError::Inject {
-                    reason: format!("更新 DR7 失败: {}", e),
-                })?;
-        }
-
-        Ok(())
-    }
-
-    /// 清除硬件断点（ARM64）
-    #[cfg(target_arch = "aarch64")]
-    fn clear_hw_breakpoint(&self, config: &HardwareBreakpointConfig, register_idx: usize) -> Result<()> {
-        let pid = Pid::from_raw(config.target_pid as i32);
-
-        unsafe {
-            let mut control_value: u64 = 0;
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_BREAK,
-                &control_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("清除 NT_ARM_HW_BREAK 失败: {}", e),
-            })?;
-
-            let mut addr_value: u64 = 0;
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_BREAK,
-                &addr_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("清除断点地址失败: {}", e),
-            })?;
-        }
-
-        Ok(())
-    }
-
-    /// 设置硬件写监视点（ARM64）
+    /// 设置硬件写监视点（ARM64）—— 通过内核模块 ioctl 通道
     #[cfg(target_arch = "aarch64")]
     pub fn add_watchpoint(&mut self, config: HardwareBreakpointConfig) -> Result<u64> {
+        use crate::communication::kernel_channel::IoctlChannel;
         let bp_id = self.next_id;
         self.next_id += 1;
 
-        let pid = Pid::from_raw(config.target_pid as i32);
-
-        unsafe {
-            let mut control_value: u64 = 1u64 << 0;
-
-            let len_bits = match config.length {
-                BreakpointLength::OneByte => 0b00,
-                BreakpointLength::TwoBytes => 0b01,
-                BreakpointLength::FourBytes => 0b11,
-                BreakpointLength::EightBytes => 0b10,
-            };
-            control_value |= (len_bits as u64) << 56;
-
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_WATCH,
-                &control_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("设置 NT_ARM_HW_WATCH 失败: {}", e),
-            })?;
-
-            let mut addr_value: u64 = config.address;
-            ptrace::setregset(
-                pid,
-                nix::sys::ptrace::RegSet::NT_ARM_HW_WATCH,
-                &addr_value as *const u64 as *const libc::c_void,
-                std::mem::size_of::<u64>() as u32,
-            ).map_err(|e| crate::FridaError::Inject {
-                reason: format!("设置监视点地址失败: {}", e),
-            })?;
-        }
+        let type_: u32 = match config.bp_type {
+            BreakpointType::Execute => 0,
+            BreakpointType::Read => 1,
+            BreakpointType::Write => 2,
+            BreakpointType::ReadWrite => 3,
+        };
+        let len: u32 = match config.length {
+            BreakpointLength::OneByte => 1,
+            BreakpointLength::TwoBytes => 2,
+            BreakpointLength::FourBytes => 4,
+            BreakpointLength::EightBytes => 8,
+        };
+        let ch = IoctlChannel::new()?;
+        let ko_bp_id = ch.hwbp_set(config.target_pid.0, config.address, type_, len)?;
+        let bp_addr = config.address;
 
         let handle = HardwareBreakpointHandle {
             bp_id,
+            ko_bp_id,
             config,
             register_index: 0,
             enabled: true,
         };
 
         self.breakpoints.insert(bp_id, handle);
-        log::info!("硬件监视点 #{} 已设置: 0x{:x}", bp_id, config.address);
+        log::info!("硬件监视点 #{} 已设置: 0x{:x}", bp_id, bp_addr);
 
         Ok(bp_id)
     }
@@ -415,6 +223,122 @@ impl HardwareBreakpointManager {
     }
 }
 
+// ======================== 平台相关的硬件断点实现（free function，避免 &self 借用冲突） ========================
+
+#[cfg(target_arch = "x86_64")]
+fn set_hw_breakpoint(config: &HardwareBreakpointConfig, register_idx: usize) -> Result<i32> {
+    let pid = Pid::from_raw(config.target_pid.0 as i32);
+    let dr_registers = [libc::DR0, libc::DR1, libc::DR2, libc::DR3];
+    let dr7_bits = [(0, 1), (2, 3), (4, 5), (6, 7)];
+    if register_idx >= 4 {
+        return Err(crate::FridaError::LimitExceeded {
+            reason: "x86_64 最多支持 4 个硬件断点".to_string(),
+        }.into());
+    }
+    unsafe {
+        ptrace::pokeuser(pid, dr_registers[register_idx] as i32, config.address as *mut libc::c_void)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("写入 DR{} 失败: {}", register_idx, e),
+                pid: config.target_pid.0,
+                source: None,
+            })?;
+        let mut dr7: u64 = ptrace::peekuser(pid, libc::DR7 as i32)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("读取 DR7 失败: {}", e),
+                pid: config.target_pid.0,
+                source: None,
+            })? as u64;
+        let (len_low, _len_high) = match config.length {
+            BreakpointLength::OneByte => (0b00, 0b00),
+            BreakpointLength::TwoBytes => (0b01, 0b01),
+            BreakpointLength::FourBytes => (0b11, 0b11),
+            BreakpointLength::EightBytes => (0b10, 0b10),
+        };
+        let (rwx_low, _rwx_high) = match config.bp_type {
+            BreakpointType::Execute => (0b00, 0b00),
+            BreakpointType::Write => (0b01, 0b00),
+            BreakpointType::Read => (0b11, 0b00),
+            BreakpointType::ReadWrite => (0b11, 0b00),
+        };
+        let (low_bit, _high_bit) = dr7_bits[register_idx];
+        dr7 |= 1u64 << low_bit;
+        dr7 &= !(0b11u64 << (16 + register_idx * 2));
+        dr7 |= (len_low as u64) << (16 + register_idx * 2);
+        dr7 &= !(0b11u64 << (24 + register_idx * 2));
+        dr7 |= (rwx_low as u64) << (24 + register_idx * 2);
+        ptrace::pokeuser(pid, libc::DR7 as i32, dr7 as *mut libc::c_void)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("写入 DR7 失败: {}", e),
+                pid: config.target_pid.0,
+                source: None,
+            })?;
+    }
+    Ok(register_idx as i32)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn clear_hw_breakpoint(config: &HardwareBreakpointConfig, register_idx: usize, _ko_bp_id: i32) -> Result<()> {
+    let pid = Pid::from_raw(config.target_pid.0 as i32);
+    let dr_registers = [libc::DR0, libc::DR1, libc::DR2, libc::DR3];
+    let dr7_bits = [(0, 1), (2, 3), (4, 5), (6, 7)];
+    unsafe {
+        ptrace::pokeuser(pid, dr_registers[register_idx] as i32, 0u64 as *mut libc::c_void)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("清除 DR{} 失败: {}", register_idx, e),
+                pid: config.target_pid.0,
+                source: None,
+            })?;
+        let mut dr7: u64 = ptrace::peekuser(pid, libc::DR7 as i32)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("读取 DR7 失败: {}", e),
+                pid: config.target_pid.0,
+                source: None,
+            })? as u64;
+        let (low_bit, _) = dr7_bits[register_idx];
+        dr7 &= !(1u64 << low_bit);
+        ptrace::pokeuser(pid, libc::DR7 as i32, dr7 as *mut libc::c_void)
+            .map_err(|e| crate::FridaError::Inject {
+                reason: format!("更新 DR7 失败: {}", e),
+                pid: config.target_pid.0,
+                source: None,
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "aarch64")]
+fn set_hw_breakpoint(config: &HardwareBreakpointConfig, _register_idx: usize) -> Result<i32> {
+    use crate::communication::kernel_channel::IoctlChannel;
+    if config.target_pid.0 == 0 {
+        return Err(crate::FridaError::Unsupported {
+            reason: "target_pid 无效".to_string(),
+        }.into());
+    }
+    let type_: u32 = match config.bp_type {
+        BreakpointType::Execute => 0,
+        BreakpointType::Read => 1,
+        BreakpointType::Write => 2,
+        BreakpointType::ReadWrite => 3,
+    };
+    let len: u32 = match config.length {
+        BreakpointLength::OneByte => 1,
+        BreakpointLength::TwoBytes => 2,
+        BreakpointLength::FourBytes => 4,
+        BreakpointLength::EightBytes => 8,
+    };
+    let ch = IoctlChannel::new()?;
+    let ko_id = ch.hwbp_set(config.target_pid.0, config.address, type_, len)?;
+    Ok(ko_id)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn clear_hw_breakpoint(_config: &HardwareBreakpointConfig, _register_idx: usize, ko_bp_id: i32) -> Result<()> {
+    use crate::communication::kernel_channel::IoctlChannel;
+    let ch = IoctlChannel::new()?;
+    ch.hwbp_clear(ko_bp_id)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,14 +351,14 @@ mod tests {
 
     #[test]
     fn test_manager_creation() {
-        let manager = HardwareBreakpointManager::new(1234);
+        let manager = HardwareBreakpointManager::new(ProcessId(1234));
         assert!(manager.is_ok());
     }
 
     #[test]
     fn test_breakpoint_config() {
         let config = HardwareBreakpointConfig {
-            target_pid: 1234,
+            target_pid: ProcessId(1234),
             target_tid: None,
             address: 0x12345678,
             bp_type: BreakpointType::Execute,

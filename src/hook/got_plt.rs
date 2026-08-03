@@ -52,12 +52,22 @@ impl std::fmt::Debug for GotHookHandle {
 pub struct GotPltHooker {
     /// 已安装的 Hook 列表
     hooks: Vec<GotHookHandle>,
+    /// 目标模块基址（用于 resolve_symbol/hook_symbol 便捷 API）
+    module_base: u64,
 }
 
 impl GotPltHooker {
     /// 创建新的 GOT/PLT Hook 安装器
     pub fn new() -> Self {
-        GotPltHooker { hooks: Vec::new() }
+        GotPltHooker { hooks: Vec::new(), module_base: 0 }
+    }
+
+    /// 创建带模块基址的 GOT/PLT Hook 安装器
+    ///
+    /// 绑定一个模块基址，后续可通过 `resolve_symbol` / `hook_symbol`
+    /// 直接对该模块进行符号解析与 Hook，无需重复传入基址。
+    pub fn new_with_base(module_base: u64) -> Self {
+        GotPltHooker { hooks: Vec::new(), module_base }
     }
 
     /// 对指定模块的符号安装 GOT Hook
@@ -229,6 +239,173 @@ impl GotPltHooker {
             reason: format!("未找到模块 '{}' 的文件路径", module_name),
         }
         .into())
+    }
+
+    /// 通过模块基址查找模块的文件路径
+    ///
+    /// 在 /proc/self/maps 中查找包含 `base` 地址的区域，返回其路径名。
+    /// 用于 `resolve_symbol` / `hook_symbol` 便捷 API。
+    #[cfg(unix)]
+    fn find_module_path_by_base(&self, base: u64) -> Result<String> {
+        let pid = crate::common::types::ProcessId(0);
+        let regions = parse_proc_maps(pid)?;
+
+        for region in &regions {
+            if !region.name.is_empty()
+                && (region.start as u64) <= base
+                && base < (region.end as u64)
+            {
+                return Ok(region.name.clone());
+            }
+        }
+
+        Err(crate::FridaError::NotFound {
+            reason: format!("未找到基址 {:#x} 对应的模块", base),
+        }
+        .into())
+    }
+
+    /// 解析符号的当前地址（便捷 API）
+    ///
+    /// 使用构造时绑定的 `module_base` 查找模块，解析 ELF 找到符号对应的
+    /// GOT 条目，返回该条目当前的值（即符号的运行时地址）。
+    ///
+    /// # 返回值
+    /// 返回 GOT 条目中存储的当前函数地址。
+    pub fn resolve_symbol(&self, symbol_name: &str) -> Result<u64> {
+        if self.module_base == 0 {
+            return Err(crate::FridaError::Other(format!(
+                "未绑定 module_base，无法解析符号 '{}'",
+                symbol_name
+            ))
+            .into());
+        }
+
+        let module_path = self.find_module_path_by_base(self.module_base)?;
+        let module_name = module_path
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| module_path.clone());
+
+        let elf_data = std::fs::read(&module_path).map_err(|e| {
+            crate::FridaError::Hook {
+                module: module_name.clone(),
+                symbol: symbol_name.to_string(),
+                reason: format!("读取模块文件失败: {}", e),
+            }
+        })?;
+
+        let got_entry_offset = self.find_got_entry(&elf_data, symbol_name)?;
+        let got_entry_addr = self.module_base + got_entry_offset;
+        let current_value = self.read_got_entry(got_entry_addr)?;
+
+        log::debug!(
+            "resolve_symbol: {}::{} GOT[{:#x}] = {:#x}",
+            module_name,
+            symbol_name,
+            got_entry_addr,
+            current_value
+        );
+
+        Ok(current_value)
+    }
+
+    /// 对符号安装 GOT Hook（便捷 API）
+    ///
+    /// 使用构造时绑定的 `module_base` 查找模块，解析 ELF 找到符号对应的
+    /// GOT 条目，将其值替换为 `replace_addr` 指向的函数。
+    ///
+    /// # 参数
+    /// - `symbol_name`: 目标符号名称（如 "openat"）
+    /// - `replace_addr`: 替换函数的地址
+    pub fn hook_symbol(
+        &mut self,
+        symbol_name: &str,
+        replace_addr: *const (),
+    ) -> Result<()> {
+        if self.module_base == 0 {
+            return Err(crate::FridaError::Other(format!(
+                "未绑定 module_base，无法 Hook 符号 '{}'",
+                symbol_name
+            ))
+            .into());
+        }
+
+        let module_path = self.find_module_path_by_base(self.module_base)?;
+        let module_name = module_path
+            .rsplit('/')
+            .next()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| module_path.clone());
+
+        let replace_addr_u64 = replace_addr as u64;
+
+        log::info!(
+            "安装 GOT Hook: {}::{} @ base {:#x} -> {:#x}",
+            module_name,
+            symbol_name,
+            self.module_base,
+            replace_addr_u64
+        );
+
+        let elf_data = std::fs::read(&module_path).map_err(|e| {
+            crate::FridaError::Hook {
+                module: module_name.clone(),
+                symbol: symbol_name.to_string(),
+                reason: format!("读取模块文件失败: {}", e),
+            }
+        })?;
+
+        let got_entry_offset = self.find_got_entry(&elf_data, symbol_name)?;
+        let got_entry_addr = self.module_base + got_entry_offset;
+        let original_value = self.read_got_entry(got_entry_addr)?;
+
+        log::debug!(
+            "GOT 条目地址: {:#x}, 原始值: {:#x}",
+            got_entry_addr,
+            original_value
+        );
+
+        if original_value == 0 {
+            log::warn!(
+                "GOT 条目 {:#x} 的值为 0，可能符号尚未解析（延迟绑定）",
+                got_entry_addr
+            );
+        }
+
+        self.write_got_entry(got_entry_addr, replace_addr_u64)?;
+
+        let verify_value = self.read_got_entry(got_entry_addr)?;
+        if verify_value != replace_addr_u64 {
+            return Err(crate::FridaError::Hook {
+                module: module_name.clone(),
+                symbol: symbol_name.to_string(),
+                reason: format!(
+                    "GOT 替换验证失败: 期望 {:#x}, 实际 {:#x}",
+                    replace_addr_u64, verify_value
+                ),
+            }
+            .into());
+        }
+
+        self.hooks.push(GotHookHandle {
+            got_entry_addr,
+            original_value,
+            module_name: module_name.clone(),
+            symbol_name: symbol_name.to_string(),
+            restored: false,
+        });
+
+        log::info!(
+            "GOT Hook 安装成功: {}::{} GOT[{:#x}] = {:#x}",
+            module_name,
+            symbol_name,
+            got_entry_addr,
+            replace_addr_u64
+        );
+
+        Ok(())
     }
 
     /// 在 ELF 中找到符号对应的 GOT 条目偏移

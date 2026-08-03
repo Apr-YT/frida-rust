@@ -60,6 +60,7 @@ pub struct PeParser {
 
 impl PeParser {
     /// 创建新的 PE 解析器
+    #[cfg(windows)]
     pub fn new(pid: u32) -> Self {
         PeParser {
             pid,
@@ -403,12 +404,14 @@ impl PeParser {
     }
 
     /// 查找符号
+    #[cfg(windows)]
     pub fn find_symbol(&self, module_name: &str, symbol_name: &str) -> Option<&PeSymbol> {
         self.modules.get(module_name)?.exports.iter()
             .find(|s| s.name == symbol_name || s.name.contains(symbol_name))
     }
 
     /// 列出所有导出符号
+    #[cfg(windows)]
     pub fn list_symbols(&self, module_name: &str) -> Option<&Vec<PeSymbol>> {
         self.modules.get(module_name).map(|m| &m.exports)
     }

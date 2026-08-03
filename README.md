@@ -27,7 +27,7 @@
 - **内存操作** - 读写搜索全支持
 - **进程分析** - 完整进程信息
 
-## 🔧 MCP 工具 (20个树状结构)
+## 🔧 MCP 工具 (22个, 按功能模块组织)
 
 ### process/ - 进程操作
 | 工具 | Unix | Windows |
@@ -75,11 +75,13 @@
 | `symbols_list` | ✅ | ✅ |
 | `symbols_find` | ✅ | ✅ |
 
-### webui/ - Web UI
+### android/ - Android 分析 (Linux/Android 平台)
 | 工具 | 说明 |
 |------|------|
-| `webui_status` | 获取 Web UI 状态和链接 |
-| `webui_report` | 获取 AI 执行报告 |
+| `android_processes` | 列出运行中的 Android 应用进程 |
+| `android_find_pid` | 按包名查找进程 PID |
+| `android_packages` | 列出已安装的 Android 包 |
+| `android_logcat` | 获取 logcat 日志快照 |
 
 ## 🚀 快速开始
 

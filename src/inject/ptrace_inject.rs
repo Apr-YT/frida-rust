@@ -494,6 +494,17 @@ impl PtraceInjector {
         self.call_remote_inner(tid, func_addr, args, trap_addr)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    pub fn call_remote_trap(
+        &mut self,
+        tid: i32,
+        func_addr: u64,
+        args: &[u64],
+        _trap_addr: u64,
+    ) -> crate::Result<u64> {
+        self.call_remote(tid, func_addr, args)
+    }
+
     #[cfg(target_arch = "aarch64")]
     fn call_remote_inner(
         &mut self,
@@ -1035,8 +1046,8 @@ impl PtraceInjector {
         // 读取 ELF 头（足够确定文件类型和大小）
         let elf_header_size = std::mem::size_of::<goblin::elf::Header>();
         let header_data = self.read_remote(pid, lib_base as usize, elf_header_size)?;
-        
-        let header = goblin::elf::Header::parse(&header_data)
+
+        let header = goblin::elf::Elf::parse_header(&header_data)
             .map_err(|e| FridaError::Other(format!("解析 ELF 头失败: {}", e)))?;
         
         // 读取完整的 ELF 文件（从内存中）

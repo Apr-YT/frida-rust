@@ -50,13 +50,13 @@ pub struct EbpfHookEvent {
 }
 
 impl ProtocolSerialize for EbpfHookEvent {
-    fn to_payload(&self) -> Result<Vec<u8>> {
+    fn to_payload(&self) -> std::result::Result<Vec<u8>, crate::FridaError> {
         serde_json::to_vec(self).map_err(|e| crate::FridaError::Protocol {
             reason: format!("eBPF 事件序列化失败: {}", e),
         })
     }
 
-    fn from_payload(data: &[u8]) -> Result<Self> {
+    fn from_payload(data: &[u8]) -> std::result::Result<Self, crate::FridaError> {
         serde_json::from_slice(data).map_err(|e| crate::FridaError::Protocol {
             reason: format!("eBPF 事件反序列化失败: {}", e),
         })
@@ -130,8 +130,9 @@ impl RingbufReceiver {
             libc::read(self.fd, self.buffer.as_mut_ptr() as *mut libc::c_void, self.buffer.len())
         };
         if n <= 0 {
-            return Err(crate::FridaError::IO {
+            return Err(crate::FridaError::Communication {
                 reason: "读取 ringbuf 失败".to_string(),
+                source: None,
             }.into());
         }
         Ok(self.buffer[..n as usize].to_vec())
@@ -192,6 +193,7 @@ impl EbpfHooker {
 
         let fd = self.create_uprobe(&config)?;
 
+        let symbol_name = config.symbol_name.clone();
         let handle = EbpfHookHandle {
             hook_id,
             config,
@@ -200,7 +202,7 @@ impl EbpfHooker {
         };
 
         self.hooks.insert(hook_id, Arc::new(Mutex::new(handle)));
-        log::info!("eBPF uprobe Hook #{} 已安装: {}", hook_id, config.symbol_name);
+        log::info!("eBPF uprobe Hook #{} 已安装: {}", hook_id, symbol_name);
 
         Ok(hook_id)
     }
@@ -215,6 +217,7 @@ impl EbpfHooker {
 
         let fd = self.create_uretprobe(&config)?;
 
+        let symbol_name = config.symbol_name.clone();
         let handle = EbpfHookHandle {
             hook_id,
             config,
@@ -223,7 +226,7 @@ impl EbpfHooker {
         };
 
         self.hooks.insert(hook_id, Arc::new(Mutex::new(handle)));
-        log::info!("eBPF uretprobe Hook #{} 已安装: {}", hook_id, config.symbol_name);
+        log::info!("eBPF uretprobe Hook #{} 已安装: {}", hook_id, symbol_name);
 
         Ok(hook_id)
     }
@@ -444,7 +447,7 @@ mod tests {
     #[test]
     fn test_bytecode_generation() {
         let config = EbpfHookConfig {
-            target_pid: 1234,
+            target_pid: crate::common::types::ProcessId(1234),
             target_addr: 0x12345678,
             hook_type: EbpfHookType::Uprobe,
             symbol_name: "test_func".to_string(),

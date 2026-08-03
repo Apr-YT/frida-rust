@@ -50,7 +50,7 @@ impl LinkerHideManager {
         
         Ok(LinkerHideManager {
             pid,
-            soinfo_list_head,
+            soinfo_list_head: soinfo_head,
             hidden_soinfo: HashMap::new(),
         })
     }
@@ -59,12 +59,13 @@ impl LinkerHideManager {
     fn find_soinfo_list_head(pid: ProcessId) -> Result<u64> {
         let maps_path = format!("/proc/{}/maps", pid);
         let maps_content = std::fs::read_to_string(&maps_path)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("读取 {} 失败: {}", maps_path, e),
+                source: None,
             })?;
 
         let mut linker_base = 0u64;
-        
+
         for line in maps_content.lines() {
             if line.contains("linker64") || line.contains("linker") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -72,7 +73,7 @@ impl LinkerHideManager {
                     let range: Vec<&str> = parts[0].split('-').collect();
                     if range.len() >= 2 {
                         linker_base = u64::from_str_radix(range[0], 16)
-                            .map_err(|e| crate::FridaError::Parse {
+                            .map_err(|e| crate::FridaError::Protocol {
                                 reason: format!("解析 linker 基址失败: {}", e),
                             })?;
                         break;
@@ -96,12 +97,13 @@ impl LinkerHideManager {
     fn search_soinfo_head_in_linker(pid: ProcessId, linker_base: u64) -> Result<u64> {
         let maps_path = format!("/proc/{}/maps", pid);
         let maps_content = std::fs::read_to_string(&maps_path)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("读取 {} 失败: {}", maps_path, e),
+                source: None,
             })?;
 
         let mut linker_end = 0u64;
-        
+
         for line in maps_content.lines() {
             if line.contains("linker64") || line.contains("linker") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -109,7 +111,7 @@ impl LinkerHideManager {
                     let range: Vec<&str> = parts[0].split('-').collect();
                     if range.len() >= 2 {
                         linker_end = u64::from_str_radix(range[1], 16)
-                            .map_err(|e| crate::FridaError::Parse {
+                            .map_err(|e| crate::FridaError::Protocol {
                                 reason: format!("解析 linker 结束地址失败: {}", e),
                             })?;
                     }
@@ -170,10 +172,10 @@ impl LinkerHideManager {
     /// 读取远程进程的 u64 值
     fn read_u64(pid: ProcessId, addr: u64) -> Result<u64> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         let data = scanner.read_bytes(addr, 8)?;
-        
+
         Ok(u64::from_le_bytes([
             data[0], data[1], data[2], data[3],
             data[4], data[5], data[6], data[7],
@@ -183,10 +185,10 @@ impl LinkerHideManager {
     /// 读取远程进程的 u32 值
     fn read_u32(pid: ProcessId, addr: u64) -> Result<u32> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         let data = scanner.read_bytes(addr, 4)?;
-        
+
         Ok(u32::from_le_bytes([
             data[0], data[1], data[2], data[3],
         ]))
@@ -195,23 +197,23 @@ impl LinkerHideManager {
     /// 写入远程进程的 u64 值
     fn write_u64(pid: ProcessId, addr: u64, value: u64) -> Result<()> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         let bytes = value.to_le_bytes().to_vec();
         scanner.write_bytes(addr, &bytes)?;
-        
+
         Ok(())
     }
 
     /// 读取远程进程的字符串
     fn read_string(pid: ProcessId, addr: u64, max_len: usize) -> Result<String> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         let data = scanner.read_bytes(addr, max_len)?;
-        
+
         let end = data.iter().position(|&b| b == 0).unwrap_or(max_len);
-        String::from_utf8_lossy(&data[..end]).to_string()
+        Ok(String::from_utf8_lossy(&data[..end]).to_string())
     }
 
     /// 枚举所有 soinfo 节点
@@ -220,17 +222,17 @@ impl LinkerHideManager {
         let mut current = self.soinfo_list_head;
 
         while current != 0 {
-            let name_addr = self.read_u64(self.pid, current + 0x20)?;
+            let name_addr = Self::read_u64(self.pid, current + 0x20)?;
             let name = if name_addr != 0 {
-                self.read_string(self.pid, name_addr, 256)?
+                Self::read_string(self.pid, name_addr, 256)?
             } else {
                 "unknown".to_string()
             };
 
-            let prev = self.read_u64(self.pid, current + 0x8)?;
-            let next = self.read_u64(self.pid, current + 0x10)?;
-            let base = self.read_u64(self.pid, current + 0x30)?;
-            let size = self.read_u64(self.pid, current + 0x38)?;
+            let prev = Self::read_u64(self.pid, current + 0x8)?;
+            let next = Self::read_u64(self.pid, current + 0x10)?;
+            let base = Self::read_u64(self.pid, current + 0x30)?;
+            let size = Self::read_u64(self.pid, current + 0x38)?;
 
             nodes.push(SoinfoNode {
                 addr: current,
@@ -265,13 +267,13 @@ impl LinkerHideManager {
     /// 隐藏 soinfo 节点
     fn hide_soinfo_node(&mut self, node: &SoinfoNode) -> Result<()> {
         if node.prev != 0 {
-            self.write_u64(self.pid, node.prev + 0x10, node.next)?;
+            Self::write_u64(self.pid, node.prev + 0x10, node.next)?;
         } else {
             self.soinfo_list_head = node.next;
         }
 
         if node.next != 0 {
-            self.write_u64(self.pid, node.next + 0x8, node.prev)?;
+            Self::write_u64(self.pid, node.next + 0x8, node.prev)?;
         }
 
         self.hidden_soinfo.insert(node.name.clone(), node.clone());
@@ -308,13 +310,13 @@ impl LinkerHideManager {
         }
 
         if let Some(prev) = prev_node {
-            self.write_u64(self.pid, prev.addr + 0x10, node.addr)?;
+            Self::write_u64(self.pid, prev.addr + 0x10, node.addr)?;
         } else {
             self.soinfo_list_head = node.addr;
         }
 
         if let Some(next) = next_node {
-            self.write_u64(self.pid, next.addr + 0x8, node.addr)?;
+            Self::write_u64(self.pid, next.addr + 0x8, node.addr)?;
         }
 
         log::info!("已恢复 so: {} (0x{:x})", node.name, node.addr);
@@ -359,10 +361,10 @@ pub mod memory_permission {
     /// 将内存页权限从 RWX 改为 RX
     pub fn mask_rwx_to_rx(pid: ProcessId, addr: u64, size: usize) -> Result<()> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         scanner.protect(addr, size, libc::PROT_READ | libc::PROT_EXEC)?;
-        
+
         log::info!("已将内存 0x{:x} 权限改为 RX", addr);
         Ok(())
     }
@@ -370,10 +372,10 @@ pub mod memory_permission {
     /// 将内存页权限从 RX 临时改为 RWX
     pub fn unmask_rx_to_rwx(pid: ProcessId, addr: u64, size: usize) -> Result<()> {
         use crate::memory::scanner::MemoryScanner;
-        
-        let scanner = MemoryScanner::new(pid)?;
+
+        let mut scanner = MemoryScanner::new(pid);
         scanner.protect(addr, size, libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC)?;
-        
+
         Ok(())
     }
 }
@@ -428,12 +430,10 @@ pub mod thread_name_randomization {
         let pid = std::process::id();
         let name = generate_system_thread_name(pid);
         let c_name = CString::new(name.clone())
-            .map_err(|e| crate::FridaError::InvalidArgument {
-                reason: format!("线程名包含空字节: {}", e),
-            })?;
+            .map_err(|e| crate::FridaError::Other(format!("线程名包含空字节: {}", e)))?;
 
         unsafe {
-            libc::pthread_setname_np(c_name.as_ptr());
+            libc::pthread_setname_np(libc::pthread_self(), c_name.as_ptr());
         }
 
         log::info!("线程 {} 已重命名为: {}", tid, name);
@@ -452,18 +452,18 @@ pub mod dual_process_deception {
         match unsafe { fork() } {
             Ok(ForkResult::Parent { child }) => {
                 unsafe {
-                    nix::sys::ptrace::ptrace(
-                        nix::sys::ptrace::PtraceCommand::PTRACE_TRACEME,
-                        nix::unistd::Pid::from_raw(0),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                    ).map_err(|e| crate::FridaError::Inject {
-                        reason: format!("PTRACE_TRACEME 失败: {}", e),
-                    })?;
+                    let ret = libc::ptrace(libc::PTRACE_TRACEME, 0, std::ptr::null_mut::<libc::c_void>(), std::ptr::null_mut::<libc::c_void>());
+                    if ret != 0 {
+                        return Err(crate::FridaError::Inject {
+                            reason: format!("PTRACE_TRACEME 失败"),
+                            pid: 0,
+                            source: None,
+                        }.into());
+                    }
                 }
 
                 log::info!("创建傀儡进程: {}", child);
-                Ok(child.as_raw() as ProcessId)
+                Ok(ProcessId(child.as_raw() as u32))
             }
             Ok(ForkResult::Child) => {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -471,29 +471,35 @@ pub mod dual_process_deception {
             }
             Err(e) => Err(crate::FridaError::Inject {
                 reason: format!("fork 失败: {}", e),
+                pid: 0,
+                source: None,
             }.into()),
         }
     }
 
     /// 通过 /proc/<pid>/mem 直接读写目标进程内存
     pub fn read_memory_direct(pid: ProcessId, addr: u64, size: usize) -> Result<Vec<u8>> {
+        use std::io::{Read, Seek, SeekFrom};
         let mem_path = format!("/proc/{}/mem", pid);
         let file = std::fs::OpenOptions::new()
             .read(true)
             .open(&mem_path)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("打开 {} 失败: {}", mem_path, e),
+                source: None,
             })?;
 
         let mut buf = vec![0u8; size];
         let mut reader = std::io::BufReader::new(file);
-        reader.seek(std::io::SeekFrom::Start(addr))
-            .map_err(|e| crate::FridaError::IO {
+        reader.seek(SeekFrom::Start(addr))
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("seek 失败: {}", e),
+                source: None,
             })?;
         reader.read_exact(&mut buf)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("读取内存失败: {}", e),
+                source: None,
             })?;
 
         Ok(buf)
@@ -501,21 +507,25 @@ pub mod dual_process_deception {
 
     /// 通过 /proc/<pid>/mem 直接写入目标进程内存
     pub fn write_memory_direct(pid: ProcessId, addr: u64, data: &[u8]) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
         let mem_path = format!("/proc/{}/mem", pid);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&mem_path)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("打开 {} 失败: {}", mem_path, e),
+                source: None,
             })?;
 
-        file.seek(std::io::SeekFrom::Start(addr))
-            .map_err(|e| crate::FridaError::IO {
+        file.seek(SeekFrom::Start(addr))
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("seek 失败: {}", e),
+                source: None,
             })?;
         file.write_all(data)
-            .map_err(|e| crate::FridaError::IO {
+            .map_err(|e| crate::FridaError::Communication {
                 reason: format!("写入内存失败: {}", e),
+                source: None,
             })?;
 
         Ok(())

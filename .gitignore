@@ -41,3 +41,6 @@ lcov.info
 # Environment
 .env
 .env.local
+
+# 构建日志（临时产物）
+build_output.txt

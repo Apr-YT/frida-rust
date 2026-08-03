@@ -13,6 +13,8 @@ pub mod scanner;
 pub mod allocator;
 pub mod elf_parser;
 pub mod pe_parser;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub mod kernel_scanner;
 
 #[cfg(windows)]
 pub mod win_allocator;
@@ -26,6 +28,8 @@ pub use scanner::MemoryScanner;
 pub use allocator::RemoteAllocator;
 pub use elf_parser::{ElfInfo, SectionInfo, SymbolEntry, parse_elf, find_symbol, find_section};
 pub use pe_parser::{PeParser, PeSymbol, PeModuleInfo};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use kernel_scanner::{KernelMemoryScanner, MessageAnalyzer, DetectedMessage, MessageAnalysis, MessageFormat, MemorySnapshot};
 
 #[cfg(windows)]
 pub use win_allocator::WinRemoteAllocator;

@@ -16,8 +16,10 @@ if base == 0 {
 }
 
 // 读取内存数据
-let data = read_memory(base + 0x1000, 64);
-log_info("读取到数据: " + data.len().to_string() + " 字节");
+if base != 0 {
+    let data = read_memory(base + 0x1000, 64);
+    log_info("读取到数据: " + data.len().to_string() + " 字节");
+}
 
 // 搜索特征码
 let pattern = [0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC];

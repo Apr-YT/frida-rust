@@ -214,12 +214,53 @@ impl Injector {
             .into());
         }
 
-        self.ptrace.restore_regs(tid)?;
-
         log::info!(
             "远程 dlopen 成功，handle = {:#x}",
             handle
         );
+
+        let agent_init_name = "frida_agent_init\0";
+        let agent_init_name_len = agent_init_name.len();
+        let agent_init_name_addr = self.ptrace.alloc_remote(pid, agent_init_name_len)?;
+        self.remote_allocs.push(RemoteAlloc {
+            addr: agent_init_name_addr,
+            size: agent_init_name_len,
+        });
+        let agent_init_name_bytes = agent_init_name.as_bytes();
+        self.ptrace.write_remote(
+            pid,
+            agent_init_name_addr as usize,
+            agent_init_name_bytes,
+        )?;
+
+        let dlsym_addr = self
+            .ptrace
+            .find_remote_dlsym(pid)
+            .map_err(|_| FridaError::Inject {
+                reason: format!("找不到 dlsym 地址"),
+                pid: pid.0,
+                source: None,
+            })?;
+
+        let dlsym_args = vec![
+            handle,
+            agent_init_name_addr,
+        ];
+
+        let agent_init_addr = self.ptrace.call_remote_trap(tid, dlsym_addr, &dlsym_args, trap_page)?;
+        if agent_init_addr != 0 {
+            log::info!("找到 frida_agent_init 地址: {:#x}", agent_init_addr);
+
+            let agent_init_args = vec![
+                0u64,
+                0u64,
+            ];
+
+            let ret = self.ptrace.call_remote_trap(tid, agent_init_addr, &agent_init_args, trap_page)?;
+            log::info!("frida_agent_init 调用返回: {:#x}", ret);
+        }
+
+        self.ptrace.restore_regs(tid)?;
 
         Ok(())
     }

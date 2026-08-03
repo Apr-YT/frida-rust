@@ -237,8 +237,6 @@ impl HostContext {
         // 跨进程（target_pid != 0）: 通过 MemoryScanner / process_vm_readv 读取目标进程内存
         // 自身进程（target_pid == 0）: 直接指针解引用（与旧行为兼容）
         let target_pid = self.target_pid.0;
-        #[cfg(unix)]
-        let scanner = self.memory_scanner.clone();
         self.register_api("read_memory", move |args| {
             if args.len() < 2 {
                 return Err(FridaError::Script {
@@ -268,7 +266,8 @@ impl HostContext {
                 #[cfg(unix)]
                 {
                     // 优先用 scanner（process_vm_readv）
-                    match scanner.dump_region(addr as u64, size) {
+                    let mut s = crate::memory::scanner::MemoryScanner::new(ProcessId(target_pid));
+                    match s.dump_region(addr as u64, size) {
                         Ok(data) => data,
                         Err(_) => {
                             // 回退：直接 /proc/<pid>/mem
@@ -359,8 +358,48 @@ impl HostContext {
         });
 
         // get_process_info: () -> Map
-        self.register_api("get_process_info", |_args| {
-            let info = ProcessInfo::from_proc();
+        let target_pid_for_info = self.target_pid.0;
+        self.register_api("get_process_info", move |_args| {
+            let info = if target_pid_for_info != 0 {
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                {
+                    let mut name = String::new();
+                    let mut ppid: u32 = 0;
+                    let mut exe_path = String::new();
+
+                    let status_path = format!("/proc/{}/status", target_pid_for_info);
+                    if let Ok(content) = std::fs::read_to_string(&status_path) {
+                        for line in content.lines() {
+                            if line.starts_with("Name:") {
+                                name = line.trim_start_matches("Name:").trim().to_string();
+                            } else if line.starts_with("PPid:") {
+                                let ppid_str = line.trim_start_matches("PPid:").trim();
+                                ppid = ppid_str.parse().unwrap_or(0);
+                            }
+                        }
+                    }
+
+                    let exe_path_path = format!("/proc/{}/exe", target_pid_for_info);
+                    if let Ok(path) = std::fs::read_link(&exe_path_path) {
+                        exe_path = path.to_string_lossy().to_string();
+                    }
+
+                    ProcessInfo {
+                        pid: target_pid_for_info,
+                        ppid,
+                        name,
+                        exe_path,
+                        cwd: String::new(),
+                        arch: crate::common::types::Architecture::current().as_str().to_string(),
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                {
+                    ProcessInfo::from_proc()
+                }
+            } else {
+                ProcessInfo::from_proc()
+            };
             let mut map = rhai::Map::new();
             map.insert("pid".into(), rhai::Dynamic::from_int(info.pid as i64));
             map.insert("ppid".into(), rhai::Dynamic::from_int(info.ppid as i64));

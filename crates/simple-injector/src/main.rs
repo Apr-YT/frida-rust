@@ -1,15 +1,30 @@
+//! 极简 ptrace 注入器（仅支持 Linux / Android）。
+//!
+//! 该工具依赖 ptrace 与 /proc，在 Windows 上构建时自动降级为提示入口。
+
+#[cfg(unix)]
 use libc::{c_int, c_long, c_void, pid_t, PTRACE_ATTACH, PTRACE_CONT, PTRACE_DETACH, PTRACE_GETREGS, PTRACE_POKEDATA, PTRACE_SETREGS};
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 const PTRACE_ATTACH_VAL: c_int = 16;
+#[cfg(unix)]
 const PTRACE_CONT_VAL: c_int = 7;
+#[cfg(unix)]
 const PTRACE_DETACH_VAL: c_int = 17;
+#[cfg(unix)]
 const PTRACE_GETREGS_VAL: c_int = 12;
+#[cfg(unix)]
 const PTRACE_SETREGS_VAL: c_int = 13;
+#[cfg(unix)]
 const PTRACE_POKEDATA_VAL: c_int = 5;
 
+#[cfg(unix)]
 #[repr(C)]
 struct user_regs_struct {
     regs: [u64; 31],
@@ -18,6 +33,7 @@ struct user_regs_struct {
     pstate: u64,
 }
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
@@ -106,6 +122,7 @@ fn main() {
     println!("✓ Injection completed!");
 }
 
+#[cfg(unix)]
 unsafe fn find_dlopen(pid: pid_t) -> u64 {
     let maps_path = format!("/proc/{}/maps", pid);
     let maps_cstr = CString::new(maps_path).unwrap();
@@ -140,6 +157,7 @@ unsafe fn find_dlopen(pid: pid_t) -> u64 {
     0
 }
 
+#[cfg(unix)]
 unsafe fn alloc_remote(pid: pid_t, size: usize) -> u64 {
     let shmem_name = format!("/dev/shm/shmem_{}", pid);
     let shmem_cstr = CString::new(shmem_name).unwrap();
@@ -167,6 +185,7 @@ unsafe fn alloc_remote(pid: pid_t, size: usize) -> u64 {
     addr as u64
 }
 
+#[cfg(unix)]
 unsafe fn write_remote(pid: pid_t, addr: u64, data: &[u8]) {
     for (i, &byte) in data.iter().enumerate() {
         ptrace(PTRACE_POKEDATA_VAL, pid, (addr + i as u64) as *mut c_void, byte as *mut c_void);
@@ -174,8 +193,15 @@ unsafe fn write_remote(pid: pid_t, addr: u64, data: &[u8]) {
     ptrace(PTRACE_POKEDATA_VAL, pid, (addr + data.len() as u64) as *mut c_void, 0u64 as *mut c_void);
 }
 
+#[cfg(unix)]
 #[link(name = "c")]
 extern "C" {
     fn ptrace(request: c_int, pid: pid_t, addr: *mut c_void, data: *mut c_void) -> c_long;
     fn waitpid(pid: pid_t, status: *mut i32, options: c_int) -> pid_t;
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("错误：simple-inject 仅支持 Linux/Android 平台（依赖 ptrace 注入）");
+    std::process::exit(1);
 }

@@ -739,7 +739,8 @@ mod tests {
 
     #[test]
     fn test_default_interceptor_filter_maps() {
-        let interceptor = DefaultProcInterceptor::new();
+        let mut interceptor = DefaultProcInterceptor::new();
+        interceptor.add_hidden_module("libfrida-agent.so");
 
         let content = "7f0000000000-7f0000001000 r-xp 00000000 08:01 1234 /usr/lib/libfoo.so\n\
                         7f0000001000-7f0000002000 rw-p 00000000 08:01 5678 /usr/lib/libfrida-agent.so\n\

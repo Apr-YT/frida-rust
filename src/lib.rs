@@ -14,6 +14,11 @@
 //! - **Linux / Android**: 完整支持所有功能
 //! - **Windows**: 支持 IAT Hook、Inline Hook 和 NamedPipe 通信
 
+// 过渡方案：抑制 Rust 2024 edition 的 static_mut_refs 警告
+// 当前 edition = "2021"，static mut 引用功能正常。
+// 未来升级到 2024 edition 时，需将 static mut 改为 AtomicPtr/OnceLock
+#![allow(static_mut_refs)]
+
 // 公共模块
 pub mod common;
 pub mod inject;
@@ -24,6 +29,7 @@ pub mod anti_detect;
 pub mod communication;
 pub mod mcp;
 pub mod ai_learning;
+pub mod ai_decision;
 pub mod webui;
 pub mod esp_analyzer;
 pub mod disasm;
@@ -42,5 +48,6 @@ pub use common::types::{
 };
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use communication::kernel_channel::{KernelChannel, NovaCmd};
+pub use ai_decision::{DecisionEngine, DecisionResult, DecisionType, ContextState, StrategyExecutor};
 
 

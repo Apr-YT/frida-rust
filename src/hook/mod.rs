@@ -17,7 +17,7 @@ pub mod java_hook;
 pub mod manager;
 #[cfg(unix)]
 pub mod ebpf_hook;
-#[cfg(unix)]
+#[cfg(feature = "hw-breakpoint")]
 pub mod hw_breakpoint;
 
 // 重新导出主要接口
@@ -28,8 +28,8 @@ pub use got_plt::{GotPltHooker, GotHookHandle};
 #[cfg(windows)]
 pub use iat_hook::{IatHooker, IatHookHandle};
 #[cfg(unix)]
-pub use java_hook::{JavaHooker, JavaHookHandle};
+pub use java_hook::{JavaHooker, JavaHookHandle, WechatMessageSender};
 #[cfg(unix)]
 pub use ebpf_hook::{EbpfHooker, EbpfHookConfig, EbpfHookEvent, EbpfHookHandle};
-#[cfg(unix)]
+#[cfg(feature = "hw-breakpoint")]
 pub use hw_breakpoint::{HardwareBreakpointManager, HardwareBreakpointConfig, HardwareBreakpointHandle};

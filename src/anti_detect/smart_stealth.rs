@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 // ======================== 检测到的反调试技术类型 ========================
 
 /// 反调试/反作弊技术类型
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AntiDebugTechnique {
     /// 检查 TracerPid
     TracerPidCheck,
@@ -279,9 +279,9 @@ impl SmartStealth {
             let name_lower = region.name.to_lowercase();
             for (signature, technique) in &anti_cheat_signatures {
                 if name_lower.contains(&signature.to_lowercase()) && !found_techniques.contains(technique) {
-                    found_techniques.insert(*technique);
+                    found_techniques.insert(technique.clone());
                     self.detections.push(DetectionResult {
-                        technique: *technique,
+                        technique: technique.clone(),
                         confidence: 90,
                         evidence: format!("发现反作弊库: {}", region.name),
                         address: Some(region.start as u64),
@@ -333,7 +333,7 @@ impl SmartStealth {
             match scanner.search_bytes(signature.as_bytes(), None) {
                 Ok(addresses) if !addresses.is_empty() => {
                     self.detections.push(DetectionResult {
-                        technique: *technique,
+                        technique: technique.clone(),
                         confidence: *confidence,
                         evidence: format!("发现反调试特征 '{}' ({} 处)", signature, addresses.len()),
                         address: addresses.first().copied(),
@@ -515,7 +515,7 @@ impl SmartStealth {
         
         // 根据检测结果生成特定推荐
         let detected_techniques: HashSet<AntiDebugTechnique> = 
-            self.detections.iter().map(|d| d.technique).collect();
+            self.detections.iter().map(|d| d.technique.clone()).collect();
         
         if detected_techniques.contains(&AntiDebugTechnique::TracerPidCheck) ||
            detected_techniques.contains(&AntiDebugTechnique::ProcStatusCheck) {

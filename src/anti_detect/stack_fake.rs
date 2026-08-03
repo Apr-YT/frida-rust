@@ -343,7 +343,7 @@ pub fn fake_call_stack(
 
 /// Windows 栈回溯器
 ///
-/// 使用 `CaptureStackBackTrace` API 捕获当前调用栈。
+/// 使用 `RtlCaptureStackBackTrace` API 捕获当前调用栈（mingw 的 dbghelp 导入库不导出 `CaptureStackBackTrace`）。
 #[cfg(windows)]
 pub struct StackWalker;
 
@@ -356,7 +356,7 @@ impl StackWalker {
             let mut buffer: [*mut winapi::ctypes::c_void; MAX_FRAMES as usize] =
                 std::mem::zeroed();
 
-            let count = CaptureStackBackTrace(
+            let count = RtlCaptureStackBackTrace(
                 0,
                 MAX_FRAMES,
                 buffer.as_mut_ptr(),
@@ -373,14 +373,14 @@ impl StackWalker {
 }
 
 #[cfg(windows)]
-#[link(name = "dbghelp")]
+#[link(name = "kernel32")]
 extern "system" {
-    fn CaptureStackBackTrace(
+    fn RtlCaptureStackBackTrace(
         FramesToSkip: u32,
         FramesToCapture: u32,
         BackTrace: *mut *mut winapi::ctypes::c_void,
         BackTraceHash: *mut u32,
-    ) -> u32;
+    ) -> u16;
 }
 
 #[cfg(test)]

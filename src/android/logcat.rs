@@ -104,7 +104,7 @@ impl LogcatReader {
             cmd.stdout(Stdio::piped());
             
             if let Ok(mut child) = cmd.spawn() {
-                if let Ok(mut stdout) = child.stdout.take() {
+                if let Some(mut stdout) = child.stdout.take() {
                     let mut buf = String::new();
                     while *running_clone.lock().unwrap() {
                         let mut tmp = [0u8; 1024];

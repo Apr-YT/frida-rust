@@ -269,7 +269,7 @@ impl EnvCleaner {
             }
         };
 
-        let mut hooker = crate::hook::got_plt::GotPltHooker::new(libc_base as u64);
+        let mut hooker = crate::hook::got_plt::GotPltHooker::new_with_base(libc_base as u64);
 
         // Hook setenv
         let setenv_addr = hooker.resolve_symbol("setenv")?;

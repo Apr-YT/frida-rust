@@ -279,7 +279,7 @@ impl NetHider {
             }
         };
 
-        let mut hooker = GotPltHooker::new(libc_base as u64);
+        let mut hooker = GotPltHooker::new_with_base(libc_base as u64);
 
         // Hook openat
         let openat_addr = hooker.resolve_symbol("openat")?;

@@ -402,7 +402,7 @@ impl JavaHooker {
     /// 通过 JavaVM->GetEnv() 获取当前线程的 JNIEnv 指针。
     /// 如果当前线程未附加到 JVM，则先调用 AttachCurrentThread。
     /// 获取成功后会缓存 JNIEnv 指针，后续调用直接返回缓存值。
-    fn get_jni_env(&mut self) -> Result<*mut libc::c_void> {
+    pub fn get_jni_env(&mut self) -> Result<*mut libc::c_void> {
         // 如果已有缓存的 JNIEnv，直接返回
         if let Some(env) = self.jni_env {
             if !env.is_null() {
@@ -1101,6 +1101,418 @@ impl Drop for JavaHooker {
                 libc::dlclose(handle);
             }
             log::debug!("已关闭 libart.so 句柄");
+        }
+    }
+}
+
+pub struct WechatMessageSender {
+    java_hooker: JavaHooker,
+}
+
+impl WechatMessageSender {
+    pub fn new() -> Self {
+        WechatMessageSender {
+            java_hooker: JavaHooker::new(),
+        }
+    }
+
+    pub fn init(&mut self) -> Result<()> {
+        self.java_hooker.init()
+    }
+
+    pub fn send_message_to_file_transfer(&mut self, content: &str) -> Result<()> {
+        log::info!("发送消息到文件传输助手: {}", content);
+        
+        let jni_env = self.java_hooker.get_jni_env()?;
+        
+        self.send_wechat_message(jni_env, "filehelper", content)?;
+        
+        Ok(())
+    }
+
+    fn send_wechat_message(&self, env: *mut libc::c_void, to_user: &str, content: &str) -> Result<()> {
+        let talker_class = self.find_class(env, "com.tencent.mm.modelmsg.CMessageWrap")?;
+        if talker_class.is_null() {
+            log::warn!("未找到 CMessageWrap 类，尝试广播方式");
+            return self.send_via_broadcast(env, content);
+        }
+
+        let jni_to_user = self.new_string_utf(env, to_user)?;
+        let jni_content = self.new_string_utf(env, content)?;
+
+        if jni_to_user.is_null() || jni_content.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "JNI".to_string(),
+                symbol: "NewStringUTF".to_string(),
+                reason: "创建 Java 字符串失败".to_string(),
+            }.into());
+        }
+
+        let constructor_sig = "(Ljava/lang/String;Ljava/lang/String;)V";
+        let constructor_id = self.get_method_id(env, talker_class, "<init>", constructor_sig)?;
+
+        if constructor_id.is_null() {
+            log::warn!("未找到构造函数，尝试其他签名");
+            let constructor_sig2 = "(Ljava/lang/String;)V";
+            let constructor_id2 = self.get_method_id(env, talker_class, "<init>", constructor_sig2)?;
+            
+            if !constructor_id2.is_null() {
+                let msg_obj = unsafe { self.new_object(env, talker_class, constructor_id2, jni_to_user as *const libc::c_void, 1) };
+                if !msg_obj.is_null() {
+                    self.set_message_content(env, msg_obj, jni_content)?;
+                    return self.send_message_obj(env, msg_obj, talker_class);
+                }
+            }
+
+            return self.send_via_broadcast(env, content);
+        }
+
+        let args = [jni_to_user, jni_content];
+        let msg_obj = unsafe { self.new_object(env, talker_class, constructor_id, args.as_ptr() as *const libc::c_void, 2) };
+
+        if msg_obj.is_null() {
+            log::warn!("创建消息对象失败，尝试广播方式");
+            return self.send_via_broadcast(env, content);
+        }
+
+        log::info!("消息对象创建成功");
+
+        self.send_message_obj(env, msg_obj, talker_class)?;
+
+        Ok(())
+    }
+
+    fn set_message_content(&self, env: *mut libc::c_void, msg_obj: *mut libc::c_void, content: *mut libc::c_void) -> Result<()> {
+        let msg_class = self.find_class(env, "com.tencent.mm.modelmsg.CMessageWrap")?;
+        if msg_class.is_null() {
+            return Ok(());
+        }
+
+        let set_content_method = self.get_method_id(env, msg_class, "setContent", "(Ljava/lang/String;)V")?;
+        if !set_content_method.is_null() {
+            unsafe { self.call_void_method(env, msg_obj, set_content_method, content as *const libc::c_void) };
+            return Ok(());
+        }
+
+        let set_content_method2 = self.get_method_id(env, msg_class, "setTalker", "(Ljava/lang/String;)V")?;
+        if !set_content_method2.is_null() {
+            unsafe { self.call_void_method(env, msg_obj, set_content_method2, content as *const libc::c_void) };
+            return Ok(());
+        }
+
+        Ok(())
+    }
+
+    fn send_message_obj(&self, env: *mut libc::c_void, msg_obj: *mut libc::c_void, msg_class: *mut libc::c_void) -> Result<()> {
+        let send_method = self.get_method_id(env, msg_class, "sendMessage", "()Z")?;
+        if !send_method.is_null() {
+            let result = unsafe { self.call_object_method(env, msg_obj, send_method, std::ptr::null_mut()) };
+            log::info!("发送结果: {:?}", result);
+            return Ok(());
+        }
+
+        let send_method2 = self.get_static_method_id(env, msg_class, "sendMessage", "(Lcom/tencent/mm/modelmsg/CMessageWrap;)Z")?;
+        if !send_method2.is_null() {
+            let result = unsafe { self.call_static_object_method(env, msg_class, send_method2, msg_obj as *const libc::c_void) };
+            log::info!("发送结果: {:?}", result);
+            return Ok(());
+        }
+
+        log::warn!("未找到发送方法，尝试广播方式");
+
+        Ok(())
+    }
+
+    fn send_via_broadcast(&self, env: *mut libc::c_void, content: &str) -> Result<()> {
+        log::info!("尝试通过广播发送消息");
+
+        let context = self.get_application_context(env)?;
+        if context.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "Context".to_string(),
+                symbol: "getApplicationContext".to_string(),
+                reason: "获取 ApplicationContext 失败".to_string(),
+            }.into());
+        }
+
+        let intent_class = self.find_class(env, "android/content/Intent")?;
+        if intent_class.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "Intent".to_string(),
+                symbol: "FindClass".to_string(),
+                reason: "未找到 Intent 类".to_string(),
+            }.into());
+        }
+
+        let action_name = self.new_string_utf(env, "com.tencent.mm.intent.action.SEND_MESSAGE")?;
+        if action_name.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "JNI".to_string(),
+                symbol: "NewStringUTF".to_string(),
+                reason: "创建 action 字符串失败".to_string(),
+            }.into());
+        }
+
+        let intent_ctor = self.get_method_id(env, intent_class, "<init>", "(Ljava/lang/String;)V")?;
+        if intent_ctor.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "Intent".to_string(),
+                symbol: "<init>".to_string(),
+                reason: "未找到 Intent 构造函数".to_string(),
+            }.into());
+        }
+
+        let intent = unsafe { self.new_object(env, intent_class, intent_ctor, action_name as *const libc::c_void, 1) };
+        if intent.is_null() {
+            return Err(crate::FridaError::Hook {
+                module: "Intent".to_string(),
+                symbol: "NewObject".to_string(),
+                reason: "创建 Intent 失败".to_string(),
+            }.into());
+        }
+
+        let put_extra_method = self.get_method_id(env, intent_class, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;")?;
+
+        if !put_extra_method.is_null() {
+            let key_str = self.new_string_utf(env, "msg_content")?;
+            let msg_str = self.new_string_utf(env, content)?;
+
+            if !key_str.is_null() && !msg_str.is_null() {
+                unsafe { self.call_object_method2(env, intent, put_extra_method, key_str, msg_str) };
+                log::info!("Intent 参数设置完成");
+            }
+        }
+
+        let context_class = self.find_class(env, "android/content/Context")?;
+        if !context_class.is_null() {
+            let send_broadcast_method = self.get_method_id(env, context_class, "sendBroadcast", "(Landroid/content/Intent;)V")?;
+
+            if !send_broadcast_method.is_null() {
+                unsafe { self.call_void_method(env, context, send_broadcast_method, intent as *const libc::c_void) };
+                log::info!("广播已发送");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn get_application_context(&self, env: *mut libc::c_void) -> Result<*mut libc::c_void> {
+        let activity_thread_class = self.find_class(env, "android/app/ActivityThread")?;
+        if activity_thread_class.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+
+        let current_method = self.get_static_method_id(env, activity_thread_class, "currentActivityThread", "()Landroid/app/ActivityThread;")?;
+        if current_method.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+
+        let activity_thread = unsafe { self.call_static_object_method(env, activity_thread_class, current_method, std::ptr::null_mut()) };
+        if activity_thread.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+
+        let get_app_method = self.get_method_id(env, activity_thread_class, "getApplication", "()Landroid/app/Application;")?;
+        if get_app_method.is_null() {
+            return Ok(std::ptr::null_mut());
+        }
+
+        let app = unsafe { self.call_object_method(env, activity_thread, get_app_method, std::ptr::null_mut()) };
+
+        if app.is_null() {
+            let get_context_method = self.get_method_id(env, activity_thread_class, "getApplicationContext", "()Landroid/content/Context;")?;
+            if !get_context_method.is_null() {
+                return Ok(unsafe { self.call_object_method(env, activity_thread, get_context_method, std::ptr::null_mut()) });
+            }
+        }
+
+        Ok(app)
+    }
+
+    fn find_class(&self, env: *mut libc::c_void, class_name: &str) -> Result<*mut libc::c_void> {
+        let jni_class_name = class_name.replace('.', "/");
+        let c_class_name = CString::new(jni_class_name.as_str())?;
+
+        unsafe {
+            let jni_env_ptr = *(env as *const *const libc::c_void);
+            let func_table = *(jni_env_ptr as *const *const libc::c_void);
+            let find_class_fn = *(func_table.add(6) as *const *const libc::c_void);
+
+            if find_class_fn.is_null() {
+                return Err(crate::FridaError::Hook {
+                    module: "JNI".to_string(),
+                    symbol: "FindClass".to_string(),
+                    reason: "FindClass 函数指针为空".to_string(),
+                }.into());
+            }
+
+            type FindClassFn = extern "system" fn(*mut libc::c_void, *const libc::c_char) -> *mut libc::c_void;
+            let find_class: FindClassFn = std::mem::transmute(find_class_fn);
+            let class = find_class(env, c_class_name.as_ptr());
+
+            Ok(class)
+        }
+    }
+
+    fn get_method_id(&self, env: *mut libc::c_void, class: *mut libc::c_void, method_name: &str, sig: &str) -> Result<*mut libc::c_void> {
+        let c_method_name = CString::new(method_name)?;
+        let c_sig = CString::new(sig)?;
+
+        unsafe {
+            let jni_env_ptr = *(env as *const *const libc::c_void);
+            let func_table = *(jni_env_ptr as *const *const libc::c_void);
+            let get_method_id_fn = *(func_table.add(33) as *const *const libc::c_void);
+
+            if get_method_id_fn.is_null() {
+                return Ok(std::ptr::null_mut());
+            }
+
+            type GetMethodIDFn = extern "system" fn(*mut libc::c_void, *mut libc::c_void, *const libc::c_char, *const libc::c_char) -> *mut libc::c_void;
+            let get_method_id: GetMethodIDFn = std::mem::transmute(get_method_id_fn);
+            let method_id = get_method_id(env, class, c_method_name.as_ptr(), c_sig.as_ptr());
+
+            Ok(method_id)
+        }
+    }
+
+    fn get_static_method_id(&self, env: *mut libc::c_void, class: *mut libc::c_void, method_name: &str, sig: &str) -> Result<*mut libc::c_void> {
+        let c_method_name = CString::new(method_name)?;
+        let c_sig = CString::new(sig)?;
+
+        unsafe {
+            let jni_env_ptr = *(env as *const *const libc::c_void);
+            let func_table = *(jni_env_ptr as *const *const libc::c_void);
+            let get_static_method_id_fn = *(func_table.add(34) as *const *const libc::c_void);
+
+            if get_static_method_id_fn.is_null() {
+                return Ok(std::ptr::null_mut());
+            }
+
+            type GetStaticMethodIDFn = extern "system" fn(*mut libc::c_void, *mut libc::c_void, *const libc::c_char, *const libc::c_char) -> *mut libc::c_void;
+            let get_static_method_id: GetStaticMethodIDFn = std::mem::transmute(get_static_method_id_fn);
+            let method_id = get_static_method_id(env, class, c_method_name.as_ptr(), c_sig.as_ptr());
+
+            Ok(method_id)
+        }
+    }
+
+    unsafe fn call_object_method(&self, env: *mut libc::c_void, obj: *mut libc::c_void, method_id: *mut libc::c_void, args: *const libc::c_void) -> *mut libc::c_void {
+        let jni_env_ptr = *(env as *const *const libc::c_void);
+        let func_table = *(jni_env_ptr as *const *const libc::c_void);
+        let call_object_method_fn = *(func_table.add(31) as *const *const libc::c_void);
+
+        if call_object_method_fn.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        type CallObjectMethodFn = unsafe extern "system" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void, ...) -> *mut libc::c_void;
+        let call_object_method: CallObjectMethodFn = std::mem::transmute(call_object_method_fn);
+        
+        if args.is_null() {
+            call_object_method(env, obj, method_id)
+        } else {
+            let arg1 = *(args as *const *mut libc::c_void);
+            call_object_method(env, obj, method_id, arg1)
+        }
+    }
+
+    unsafe fn call_object_method2(&self, env: *mut libc::c_void, obj: *mut libc::c_void, method_id: *mut libc::c_void, arg1: *mut libc::c_void, arg2: *mut libc::c_void) -> *mut libc::c_void {
+        let jni_env_ptr = *(env as *const *const libc::c_void);
+        let func_table = *(jni_env_ptr as *const *const libc::c_void);
+        let call_object_method_fn = *(func_table.add(31) as *const *const libc::c_void);
+
+        if call_object_method_fn.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        type CallObjectMethodFn = unsafe extern "system" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void, ...) -> *mut libc::c_void;
+        let call_object_method: CallObjectMethodFn = std::mem::transmute(call_object_method_fn);
+        call_object_method(env, obj, method_id, arg1, arg2)
+    }
+
+    unsafe fn call_static_object_method(&self, env: *mut libc::c_void, class: *mut libc::c_void, method_id: *mut libc::c_void, args: *const libc::c_void) -> *mut libc::c_void {
+        let jni_env_ptr = *(env as *const *const libc::c_void);
+        let func_table = *(jni_env_ptr as *const *const libc::c_void);
+        let call_static_object_method_fn = *(func_table.add(45) as *const *const libc::c_void);
+
+        if call_static_object_method_fn.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        type CallStaticObjectMethodFn = unsafe extern "system" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void, ...) -> *mut libc::c_void;
+        let call_static_object_method: CallStaticObjectMethodFn = std::mem::transmute(call_static_object_method_fn);
+        
+        if args.is_null() {
+            call_static_object_method(env, class, method_id)
+        } else {
+            let arg1 = *(args as *const *mut libc::c_void);
+            call_static_object_method(env, class, method_id, arg1)
+        }
+    }
+
+    unsafe fn call_void_method(&self, env: *mut libc::c_void, obj: *mut libc::c_void, method_id: *mut libc::c_void, args: *const libc::c_void) {
+        let jni_env_ptr = *(env as *const *const libc::c_void);
+        let func_table = *(jni_env_ptr as *const *const libc::c_void);
+        let call_void_method_fn = *(func_table.add(30) as *const *const libc::c_void);
+
+        if call_void_method_fn.is_null() {
+            return;
+        }
+
+        type CallVoidMethodFn = unsafe extern "system" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void, ...);
+        let call_void_method: CallVoidMethodFn = std::mem::transmute(call_void_method_fn);
+        
+        if args.is_null() {
+            call_void_method(env, obj, method_id)
+        } else {
+            let arg1 = *(args as *const *mut libc::c_void);
+            call_void_method(env, obj, method_id, arg1)
+        }
+    }
+
+    fn new_string_utf(&self, env: *mut libc::c_void, s: &str) -> Result<*mut libc::c_void> {
+        let c_str = CString::new(s)?;
+
+        unsafe {
+            let jni_env_ptr = *(env as *const *const libc::c_void);
+            let func_table = *(jni_env_ptr as *const *const libc::c_void);
+            let new_string_utf_fn = *(func_table.add(11) as *const *const libc::c_void);
+
+            if new_string_utf_fn.is_null() {
+                return Ok(std::ptr::null_mut());
+            }
+
+            type NewStringUTFfn = extern "system" fn(*mut libc::c_void, *const libc::c_char) -> *mut libc::c_void;
+            let new_string_utf: NewStringUTFfn = std::mem::transmute(new_string_utf_fn);
+            let jstr = new_string_utf(env, c_str.as_ptr());
+
+            Ok(jstr)
+        }
+    }
+
+    unsafe fn new_object(&self, env: *mut libc::c_void, class: *mut libc::c_void, method_id: *mut libc::c_void, args: *const libc::c_void, arg_count: usize) -> *mut libc::c_void {
+        let jni_env_ptr = *(env as *const *const libc::c_void);
+        let func_table = *(jni_env_ptr as *const *const libc::c_void);
+        let new_object_fn = *(func_table.add(17) as *const *const libc::c_void);
+
+        if new_object_fn.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        type NewObjectFn = unsafe extern "system" fn(*mut libc::c_void, *mut libc::c_void, *mut libc::c_void, ...) -> *mut libc::c_void;
+        let new_object: NewObjectFn = std::mem::transmute(new_object_fn);
+        
+        match arg_count {
+            0 => new_object(env, class, method_id),
+            1 => {
+                let arg1 = *(args as *const *mut libc::c_void);
+                new_object(env, class, method_id, arg1)
+            }
+            2 => {
+                let args_arr = args as *const [*mut libc::c_void; 2];
+                new_object(env, class, method_id, (*args_arr)[0], (*args_arr)[1])
+            }
+            _ => std::ptr::null_mut(),
         }
     }
 }

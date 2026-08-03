@@ -162,13 +162,14 @@ impl MemoryScanner {
     pub fn dump_module(&mut self, module_name: &str) -> Result<(u64, Vec<u8>)> {
         self.ensure_regions()?;
 
-        let module_regions: Vec<&MemoryRegion> = self
+        let module_regions: Vec<MemoryRegion> = self
             .regions
             .iter()
             .filter(|r| {
                 !r.name.is_empty()
                     && (r.name.ends_with(module_name) || r.name.contains(module_name))
             })
+            .cloned()
             .collect();
 
         if module_regions.is_empty() {
@@ -247,8 +248,9 @@ impl MemoryScanner {
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
     fn read_region_kernel(&mut self, addr: usize, size: usize) -> Result<Vec<u8>> {
+        let pid_val = self.pid.0 as i32;
         if let Some(channel) = self.ensure_kernel_channel() {
-            match channel.read_mem(self.pid.0 as i32, addr, size) {
+            match channel.read_mem(pid_val, addr, size) {
                 Ok(data) => {
                     log::trace!("内核通道读取成功: addr={:#x}, size={}", addr, size);
                     return Ok(data);
@@ -354,6 +356,75 @@ impl MemoryScanner {
         }
 
         Ok(regions)
+    }
+
+    /// 读取指定地址的字节（跨进程，Unix 专用）
+    #[cfg(unix)]
+    pub fn read_bytes(&mut self, addr: u64, size: usize) -> Result<Vec<u8>> {
+        self.read_region(addr as usize, size)
+    }
+
+    /// 写入字节到指定地址（跨进程，Unix 专用）
+    #[cfg(unix)]
+    pub fn write_bytes(&mut self, addr: u64, data: &[u8]) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        if self.pid.0 == 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    addr as *mut u8,
+                    data.len(),
+                );
+            }
+            return Ok(());
+        }
+        let mem_path = format!("/proc/{}/mem", self.pid.0);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&mem_path)
+            .map_err(|e| crate::FridaError::Communication {
+                reason: format!("打开 {} 失败: {}", mem_path, e),
+                source: None,
+            })?;
+        file.seek(SeekFrom::Start(addr))
+            .map_err(|e| crate::FridaError::Communication {
+                reason: format!("seek 失败: {}", e),
+                source: None,
+            })?;
+        file.write_all(data)
+            .map_err(|e| crate::FridaError::Communication {
+                reason: format!("写入内存失败: {}", e),
+                source: None,
+            })?;
+        Ok(())
+    }
+
+    /// 修改内存保护属性（Unix 专用）
+    #[cfg(unix)]
+    pub fn protect(&mut self, addr: u64, size: usize, prot: libc::c_int) -> Result<()> {
+        let page_size = crate::common::util::page_size();
+        let aligned = (addr as usize / page_size) * page_size;
+        let end = addr as usize + size;
+        let aligned_end = ((end + page_size - 1) / page_size) * page_size;
+        let protect_size = aligned_end - aligned;
+        let ret = unsafe {
+            libc::mprotect(
+                aligned as *mut libc::c_void,
+                protect_size,
+                prot,
+            )
+        };
+        if ret != 0 {
+            return Err(crate::FridaError::MemoryProtect {
+                address: aligned,
+                reason: format!(
+                    "mprotect 失败: {}",
+                    std::io::Error::last_os_error()
+                ),
+            }
+            .into());
+        }
+        Ok(())
     }
 }
 

@@ -11,6 +11,11 @@ fn main() {
     // 静态链接标准库（可选）
     // println!("cargo:rustc-link-lib=static=c");
 
+    // Windows 平台需要链接 dbghelp 库（CaptureStackBackTrace）
+    if cfg!(target_os = "windows") {
+        println!("cargo:rustc-link-lib=dbghelp");
+    }
+
     // 编译优化
     println!("cargo:rustc-env=BUILD_TARGET={}", std::env::var("TARGET").unwrap_or_default());
     println!("cargo:rustc-env=PROFILE={}", std::env::var("PROFILE").unwrap_or_default());

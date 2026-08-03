@@ -21,6 +21,7 @@
 pub mod protocol;
 pub mod channel;
 pub mod server;
+pub mod examples;
 
 #[cfg(windows)]
 pub mod win_channel;
@@ -35,6 +36,13 @@ pub use channel::{SharedMemChannel, UnixSocketChannel};
 #[cfg(windows)]
 pub use win_channel::{NamedPipeClientChannel, NamedPipeServerChannel};
 #[cfg(any(target_os = "linux", target_os = "android"))]
-pub use kernel_channel::{KernelChannel, NovaCmd, NovaRequest, NovaResponse};
+pub use kernel_channel::{KernelChannel, NovaCmd, NovaRequest, NovaResponse, IoctlChannel, NovaStatusRaw, NovaIoctlMemReq, NovaHwbpConfig, NovaHwbpInfo};
 pub use protocol::{Message, MessageHeader, MessageType};
 pub use server::CommServer;
+pub use examples::{
+    run_channel_demo, run_stdio_demo,
+    create_message_example, parse_message_example, build_memory_read_request,
+    build_hook_install_request, build_inject_request,
+};
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub use examples::{run_unix_socket_demo, run_encrypted_channel_demo};

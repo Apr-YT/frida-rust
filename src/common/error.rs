@@ -171,6 +171,13 @@ pub enum FridaError {
         reason: String,
     },
 
+    /// 达到资源上限（如硬件断点数量）
+    #[error("资源超限: {reason}")]
+    LimitExceeded {
+        /// 错误原因
+        reason: String,
+    },
+
     /// 未找到目标进程或模块
     #[error("未找到: {reason}")]
     NotFound {
