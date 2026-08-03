@@ -505,6 +505,8 @@ mod arm64_decoder {
 pub struct InlineHooker {
     /// 跳板内存池（预分配的可执行内存）
     trampoline_pages: Vec<TrampolinePage>,
+    /// 远程目标进程 PID（Some = 跨进程 Hook，None = 当前进程）
+    pid: Option<u32>,
 }
 
 /// 跳板内存页（用于批量分配小的跳板块）
@@ -531,10 +533,22 @@ impl TrampolinePage {
 }
 
 impl InlineHooker {
-    /// 创建新的 Inline Hook 安装器
+    /// 创建新的 Inline Hook 安装器（操作当前进程）
     pub fn new() -> Self {
         InlineHooker {
             trampoline_pages: Vec::new(),
+            pid: None,
+        }
+    }
+
+    /// 创建跨进程 Inline Hook 安装器（Windows）
+    ///
+    /// 通过 `ReadProcessMemory` / `WriteProcessMemory` / `VirtualAllocEx`
+    /// 直接操作目标进程的内存，无需先注入。
+    pub fn new_remote(pid: u32) -> Self {
+        InlineHooker {
+            trampoline_pages: Vec::new(),
+            pid: Some(pid),
         }
     }
 
@@ -778,6 +792,20 @@ impl InlineHooker {
 
     /// 从指定地址读取内存
     fn read_memory(&self, addr: u64, size: usize) -> Result<Vec<u8>> {
+        if let Some(pid) = self.pid {
+            #[cfg(windows)]
+            {
+                return self.read_remote_memory_windows(pid, addr, size);
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(crate::FridaError::Unsupported {
+                    reason: "跨进程 Inline Hook 仅支持 Windows 平台".to_string(),
+                }
+                .into());
+            }
+        }
+
         let mut buf = vec![0u8; size];
 
         // SAFETY: 调用者需确保地址有效
@@ -803,6 +831,20 @@ impl InlineHooker {
 
     /// 向指定地址写入内存（自动处理内存保护）
     pub fn write_memory(&self, addr: u64, data: &[u8]) -> Result<()> {
+        if let Some(pid) = self.pid {
+            #[cfg(windows)]
+            {
+                return self.write_remote_memory_windows(pid, addr, data);
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(crate::FridaError::Unsupported {
+                    reason: "跨进程 Inline Hook 仅支持 Windows 平台".to_string(),
+                }
+                .into());
+            }
+        }
+
         let page_addr = align_to_page(addr as usize);
         let end_addr = align_to_page_up((addr + data.len() as u64) as usize);
         let protect_size = end_addr - page_addr;
@@ -912,6 +954,20 @@ impl InlineHooker {
 
     /// 分配跳板内存（RWX 权限）
     fn alloc_trampoline(&mut self, size: usize) -> Result<u64> {
+        if self.pid.is_some() {
+            #[cfg(windows)]
+            {
+                return self.alloc_trampoline_remote_windows(size);
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(crate::FridaError::Unsupported {
+                    reason: "跨进程 Inline Hook 仅支持 Windows 平台".to_string(),
+                }
+                .into());
+            }
+        }
+
         // 先尝试在现有页面中分配
         for page in &mut self.trampoline_pages {
             if let Some(addr) = page.alloc(size) {
@@ -1193,9 +1249,24 @@ impl InlineHooker {
     fn flush_instruction_cache(&self, addr: u64, size: usize) {
         #[cfg(windows)]
         {
-            use winapi::um::processthreadsapi::{FlushInstructionCache, GetCurrentProcess};
-            unsafe {
-                FlushInstructionCache(GetCurrentProcess(), addr as *const _, size);
+            use winapi::um::handleapi::CloseHandle;
+            use winapi::um::processthreadsapi::{FlushInstructionCache, GetCurrentProcess, OpenProcess};
+            use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION};
+
+            if let Some(pid) = self.pid {
+                let handle = unsafe {
+                    OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION, 0, pid)
+                };
+                if !handle.is_null() {
+                    unsafe {
+                        FlushInstructionCache(handle, addr as *const _, size);
+                        CloseHandle(handle);
+                    }
+                }
+            } else {
+                unsafe {
+                    FlushInstructionCache(GetCurrentProcess(), addr as *const _, size);
+                }
             }
             log::debug!("指令缓存已刷新 (Windows): {:#x} - {:#x}", addr, addr + size as u64);
         }
@@ -1214,9 +1285,201 @@ impl InlineHooker {
             log::debug!("指令缓存已刷新: {:#x} - {:#x}", addr, addr + size as u64);
         }
     }
-}
 
-impl Default for InlineHooker {
+    // ======================== 远程内存操作 (Windows) ========================
+
+    /// 远程读取目标进程内存
+    #[cfg(windows)]
+    fn read_remote_memory_windows(&self, pid: u32, addr: u64, size: usize) -> Result<Vec<u8>> {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::memoryapi::ReadProcessMemory;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let handle = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return Err(crate::FridaError::MemoryRead {
+                address: addr as usize,
+                size,
+                reason: format!("OpenProcess 失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+
+        let mut buf = vec![0u8; size];
+        let mut read = 0usize;
+        let ok = unsafe {
+            ReadProcessMemory(
+                handle,
+                addr as *mut winapi::ctypes::c_void,
+                buf.as_mut_ptr() as *mut winapi::ctypes::c_void,
+                size,
+                &mut read,
+            )
+        };
+        unsafe { CloseHandle(handle) };
+
+        if ok == 0 {
+            return Err(crate::FridaError::MemoryRead {
+                address: addr as usize,
+                size,
+                reason: format!("ReadProcessMemory 失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+
+        if read != size {
+            buf.truncate(read);
+        }
+        Ok(buf)
+    }
+
+    /// 远程写入目标进程内存（自动修改页面保护）
+    #[cfg(windows)]
+    fn write_remote_memory_windows(&self, pid: u32, addr: u64, data: &[u8]) -> Result<()> {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::memoryapi::{VirtualProtectEx, WriteProcessMemory};
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{
+            PAGE_EXECUTE_READWRITE, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION,
+            PROCESS_VM_WRITE,
+        };
+
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(crate::FridaError::MemoryWrite {
+                address: addr as usize,
+                size: data.len(),
+                reason: format!("OpenProcess 失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+
+        let page_addr = align_to_page(addr as usize);
+        let end_addr = align_to_page_up((addr + data.len() as u64) as usize);
+        let protect_size = end_addr - page_addr;
+        let mut old_protect = 0u32;
+
+        let vp = unsafe {
+            VirtualProtectEx(
+                handle,
+                page_addr as *mut winapi::ctypes::c_void,
+                protect_size,
+                PAGE_EXECUTE_READWRITE,
+                &mut old_protect,
+            )
+        };
+
+        let mut written = 0usize;
+        let wp = if vp != 0 {
+            unsafe {
+                WriteProcessMemory(
+                    handle,
+                    addr as *mut winapi::ctypes::c_void,
+                    data.as_ptr() as *const winapi::ctypes::c_void,
+                    data.len(),
+                    &mut written,
+                )
+            }
+        } else {
+            0
+        };
+
+        if vp != 0 {
+            unsafe {
+                VirtualProtectEx(
+                    handle,
+                    page_addr as *mut winapi::ctypes::c_void,
+                    protect_size,
+                    old_protect,
+                    &mut old_protect,
+                );
+            }
+        }
+        unsafe { CloseHandle(handle) };
+
+        if vp == 0 || wp == 0 || written != data.len() {
+            return Err(crate::FridaError::MemoryWrite {
+                address: addr as usize,
+                size: data.len(),
+                reason: format!("远程写入失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    /// 在远程进程分配可执行跳板内存
+    #[cfg(windows)]
+    fn alloc_trampoline_remote_windows(&mut self, size: usize) -> Result<u64> {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::memoryapi::VirtualAllocEx;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::winnt::{
+            MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, PROCESS_QUERY_INFORMATION,
+            PROCESS_VM_OPERATION,
+        };
+
+        let pid = self.pid.unwrap();
+        let handle = unsafe {
+            OpenProcess(PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, 0, pid)
+        };
+        if handle.is_null() {
+            return Err(crate::FridaError::MemoryWrite {
+                address: 0,
+                size,
+                reason: format!("OpenProcess 失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+
+        let alloc_size = 4096usize.max(size);
+        let addr = unsafe {
+            VirtualAllocEx(
+                handle,
+                std::ptr::null_mut(),
+                alloc_size,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            )
+        };
+        unsafe { CloseHandle(handle) };
+
+        if addr.is_null() {
+            return Err(crate::FridaError::MemoryWrite {
+                address: 0,
+                size,
+                reason: format!("VirtualAllocEx 跳板内存失败: {}", std::io::Error::last_os_error()),
+            }
+            .into());
+        }
+
+        log::debug!("远程分配跳板页 (PID {}): {:#x}, 大小: {}", pid, addr as u64, alloc_size);
+
+        let mut page = TrampolinePage {
+            base: addr as u64,
+            size: alloc_size,
+            offset: 0,
+        };
+        let trampoline_addr = page.alloc(size).unwrap();
+        self.trampoline_pages.push(page);
+        Ok(trampoline_addr)
+    }
+}  impl Default for InlineHooker {
     fn default() -> Self {
         Self::new()
     }
@@ -1229,16 +1492,21 @@ impl Drop for InlineHooker {
             use winapi::um::memoryapi::VirtualFree;
             use winapi::um::winnt::MEM_RELEASE;
 
-            for page in &self.trampoline_pages {
-                let ret = unsafe { VirtualFree(page.base as *mut _, 0, MEM_RELEASE) };
-                if ret == 0 {
-                    log::warn!(
-                        "释放跳板内存失败 @ {:#x}: {}",
-                        page.base,
-                        std::io::Error::last_os_error()
-                    );
-                } else {
-                    log::debug!("释放跳板内存 @ {:#x}", page.base);
+            if self.pid.is_some() {
+                // 远程跳板内存属于目标进程，控制端析构时无需释放
+                log::debug!("远程 Hook 模式：跳板内存由目标进程持有，跳过释放");
+            } else {
+                for page in &self.trampoline_pages {
+                    let ret = unsafe { VirtualFree(page.base as *mut _, 0, MEM_RELEASE) };
+                    if ret == 0 {
+                        log::warn!(
+                            "释放跳板内存失败 @ {:#x}: {}",
+                            page.base,
+                            std::io::Error::last_os_error()
+                        );
+                    } else {
+                        log::debug!("释放跳板内存 @ {:#x}", page.base);
+                    }
                 }
             }
         }
@@ -1284,5 +1552,70 @@ impl InlineHooker {
 
     pub fn uninstall(&mut self, _trampoline: &Trampoline) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    /// 串行化测试：Inline Hook 修改的是真实代码页，并行执行会互相踩踏
+    static HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[inline(never)]
+    extern "C" fn hook_target(x: i32) -> i32 {
+        x + 1
+    }
+
+    #[inline(never)]
+    extern "C" fn hook_detour(x: i32) -> i32 {
+        x + 100
+    }
+
+    #[inline(never)]
+    extern "C" fn hook_target_remote(x: i32) -> i32 {
+        x + 2
+    }
+
+    /// 端到端：安装 hook 后调用被拦截，卸载后恢复
+    #[test]
+    fn test_inline_hook_install_uninstall() {
+        let _guard = HOOK_TEST_LOCK.lock().unwrap();
+        let target: extern "C" fn(i32) -> i32 = hook_target;
+        let detour: extern "C" fn(i32) -> i32 = hook_detour;
+
+        assert_eq!(target(1), 2, "hook 前应返回原值");
+
+        let mut hooker = InlineHooker::new();
+        let trampoline = hooker
+            .install(target as usize as u64, detour as usize as u64)
+            .expect("安装 Inline Hook 失败");
+
+        assert_eq!(target(1), 101, "hook 后应被 detour 拦截");
+
+        hooker.uninstall(&trampoline).expect("卸载 Inline Hook 失败");
+        assert_eq!(target(1), 2, "卸载后应恢复原始行为");
+    }
+
+    /// 端到端（远程模式）：通过 ReadProcessMemory/WriteProcessMemory 操作自身进程
+    #[cfg(windows)]
+    #[test]
+    fn test_inline_hook_remote_same_process() {
+        let _guard = HOOK_TEST_LOCK.lock().unwrap();
+        let pid = unsafe { winapi::um::processthreadsapi::GetCurrentProcessId() };
+        let target: extern "C" fn(i32) -> i32 = hook_target_remote;
+        let detour: extern "C" fn(i32) -> i32 = hook_detour;
+
+        assert_eq!(target(1), 3, "hook 前应返回原值");
+
+        let mut hooker = InlineHooker::new_remote(pid);
+        let trampoline = hooker
+            .install(target as usize as u64, detour as usize as u64)
+            .expect("远程安装 Inline Hook 失败");
+
+        assert_eq!(target(1), 101, "远程 hook 后应被 detour 拦截");
+
+        hooker.uninstall(&trampoline).expect("远程卸载 Inline Hook 失败");
+        assert_eq!(target(1), 3, "卸载后应恢复原始行为");
     }
 }
