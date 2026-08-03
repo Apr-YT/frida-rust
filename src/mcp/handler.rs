@@ -8,6 +8,7 @@
 //! - ai/ - AI学习
 //! - esp/ - ESP分析
 //! - symbols/ - 符号操作
+//! - script/ - 脚本执行
 
 use rmcp::{
     ServerHandler, tool, tool_router, tool_handler,
@@ -25,6 +26,9 @@ static HOOK_MANAGER: Mutex<Option<crate::hook::HookManager>> = Mutex::new(None);
 
 // 全局 AI 学习引擎
 static AI_ENGINE: Mutex<Option<crate::ai_learning::AILearningEngine>> = Mutex::new(None);
+
+// 全局脚本引擎（按目标 PID 缓存，跨调用保留脚本作用域）
+static SCRIPT_ENGINE: Mutex<Option<(ProcessId, crate::script::ScriptEngineHandle)>> = Mutex::new(None);
 
 // 获取或初始化 AI 引擎
 fn get_ai_engine() -> std::sync::MutexGuard<'static, Option<crate::ai_learning::AILearningEngine>> {
@@ -96,6 +100,18 @@ struct AndroidPackageParams { package_name: String }
 #[derive(Deserialize, JsonSchema)]
 #[allow(dead_code)]
 struct AndroidLogcatParams { tag: Option<String>, level: Option<String>, pid: Option<u32> }
+
+#[derive(Deserialize, JsonSchema)]
+struct RunScriptParams {
+    /// 目标进程 PID（可选；不传则作用于当前进程）
+    #[serde(default)]
+    pid: Option<u32>,
+    /// Rhai 脚本源码
+    script: String,
+    /// 是否重置引擎（清空作用域后重新初始化）
+    #[serde(default)]
+    reset: Option<bool>,
+}
 
 #[derive(Clone)]
 pub struct FridaMcpServer;
@@ -765,6 +781,28 @@ impl FridaMcpServer {
             }
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
+
+    // ==================== script/ ====================
+
+    #[tool(description = "执行 Rhai 脚本 (script: Rhai 源码; pid: 可选目标进程; reset: 可选重置引擎)")]
+    async fn run_script(&self, Parameters(p): Parameters<RunScriptParams>) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            let handle = get_script_engine(p.pid, p.reset.unwrap_or(false))?;
+            let result = handle
+                .execute_text(&p.script)
+                .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+            let mut output = format!("返回值: {}\n", result.value);
+            if !result.logs.is_empty() {
+                output.push_str("脚本日志:\n");
+                for line in &result.logs {
+                    output.push_str(&format!("  {}\n", line));
+                }
+            }
+            Ok(output)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
 }
 
 #[tool_handler(
@@ -775,6 +813,29 @@ impl FridaMcpServer {
 impl ServerHandler for FridaMcpServer {}
 
 // ======================== 辅助函数 ========================
+
+/// 获取（或按目标 PID 重建）脚本引擎句柄
+///
+/// 引擎按 PID 缓存：首次调用或 PID 变化/显式 reset 时重新初始化，
+/// 其余调用复用同一个引擎，脚本作用域（let 变量等）跨调用保留。
+fn get_script_engine(pid: Option<u32>, reset: bool) -> Result<crate::script::ScriptEngineHandle, McpError> {
+    let target = ProcessId(pid.unwrap_or(0));
+    let mut guard = SCRIPT_ENGINE.lock().unwrap();
+    let needs_rebuild = reset || guard.as_ref().map(|(cur, _)| *cur != target).unwrap_or(true);
+    if needs_rebuild {
+        let engine = if target.0 == 0 {
+            crate::script::ScriptEngine::new()
+        } else {
+            crate::script::ScriptEngine::for_pid(target)
+        }
+        .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+        let handle = engine.into_handle();
+        *guard = Some((target, handle.clone()));
+        Ok(handle)
+    } else {
+        Ok(guard.as_ref().expect("脚本引擎已初始化").1.clone())
+    }
+}
 
 fn parse_hex(s: &str) -> Result<usize, McpError> {
     let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
@@ -812,5 +873,54 @@ fn format_disassembly(bytes: &[u8], base_addr: usize, max_instr: usize) -> Strin
         Err(e) => {
             format!("创建反汇编器失败: {}\n", e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 串行化脚本引擎相关测试（共享全局 SCRIPT_ENGINE 状态）
+    static SCRIPT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_get_script_engine_persists_scope() {
+        let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+        let handle = get_script_engine(None, false).expect("获取引擎失败");
+        handle.execute_text("let mcp_val = 7;").expect("初始化作用域失败");
+        let result = handle.execute_text("mcp_val + 1").expect("执行失败");
+        assert_eq!(result.value.as_int().unwrap(), 8);
+    }
+
+    #[test]
+    fn test_get_script_engine_rebuilds_on_reset() {
+        let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+        let handle = get_script_engine(None, false).expect("获取引擎失败");
+        handle.execute_text("let mcp_val = 7;").expect("初始化作用域失败");
+
+        // 显式 reset 后引擎重建，旧变量不可见
+        let handle = get_script_engine(None, true).expect("重建引擎失败");
+        assert!(handle.execute_text("mcp_val + 1").is_err());
+    }
+
+    #[test]
+    fn test_get_script_engine_rebuilds_on_pid_change() {
+        let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+        let handle = get_script_engine(Some(1), false).expect("获取引擎失败");
+        handle.execute_text("let mcp_val = 1;").expect("初始化作用域失败");
+
+        let handle = get_script_engine(Some(2), false).expect("获取引擎失败");
+        assert!(handle.execute_text("mcp_val + 1").is_err());
+    }
+
+    #[test]
+    fn test_run_script_logs_and_value() {
+        let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+        let handle = get_script_engine(None, true).expect("获取引擎失败");
+        let result = handle
+            .execute_text(r#"log_info("mcp hello"); 21 * 2"#)
+            .expect("执行失败");
+        assert_eq!(result.value.as_int().unwrap(), 42);
+        assert!(result.logs.iter().any(|l| l.contains("mcp hello")));
     }
 }

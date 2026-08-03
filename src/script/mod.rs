@@ -13,6 +13,6 @@ pub mod host_context;
 pub mod loader;
 
 // 重新导出主要类型
-pub use engine::{ScriptEngine, ScriptResult, ScriptState};
+pub use engine::{ScriptEngine, ScriptEngineHandle, ScriptResult, ScriptState};
 pub use host_context::{HostContext, ProcessInfo};
 pub use loader::{ScriptAST, ScriptLoader, encrypt_script};

@@ -77,8 +77,10 @@ pub struct ScriptEngine {
     state: ScriptState,
     /// 宿主上下文（持有 hook_manager、memory_scanner 等）
     host_ctx: HostContext,
-    /// 脚本日志收集器
+    /// 脚本日志收集器（引擎共享，脚本侧 log_info/log_warn 写入）
     logs: Vec<String>,
+    /// 共享日志收集器（供脚本侧函数并发写入）
+    log_sink: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// 当前加载的加密脚本数据（用于热重载时比对）
     current_script_data: Vec<u8>,
     /// 脚本加载器
@@ -113,9 +115,10 @@ impl ScriptEngine {
         // ============ 初始化宿主上下文和加载器 ============
         let mut host_ctx = HostContext::new();
         let loader = ScriptLoader::new();
+        let log_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // ============ 注册 API ============
-        register_apis(&mut engine, &mut host_ctx);
+        register_apis(&mut engine, &mut host_ctx, log_sink.clone());
 
         log::info!("脚本引擎初始化完成（极致裁剪模式）");
         Ok(ScriptEngine {
@@ -124,6 +127,7 @@ impl ScriptEngine {
             state: ScriptState::Running,
             host_ctx,
             logs: Vec::new(),
+            log_sink,
             current_script_data: Vec::new(),
             loader,
         })
@@ -141,8 +145,9 @@ impl ScriptEngine {
         engine.set_max_string_size(1024 * 1024);
         let mut host_ctx = HostContext::for_pid(pid);
         let loader = ScriptLoader::new();
+        let log_sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        register_apis(&mut engine, &mut host_ctx);
+        register_apis(&mut engine, &mut host_ctx, log_sink.clone());
 
         log::info!("脚本引擎初始化完成（目标 PID: {}，极致裁剪模式）", pid.0);
         Ok(ScriptEngine {
@@ -151,6 +156,7 @@ impl ScriptEngine {
             state: ScriptState::Running,
             host_ctx,
             logs: Vec::new(),
+            log_sink,
             current_script_data: Vec::new(),
             loader,
         })
@@ -160,7 +166,7 @@ impl ScriptEngine {
     ///
     /// 将宿主上下文中的 API 注册为 Rhai 引擎可调用的全局函数。
     pub fn register_apis(&mut self) {
-        register_apis(&mut self.engine, &mut self.host_ctx);
+        register_apis(&mut self.engine, &mut self.host_ctx, self.log_sink.clone());
     }
 
     /// 获取宿主上下文的不可变引用
@@ -225,8 +231,11 @@ impl ScriptEngine {
 
         log::debug!("执行明文脚本 ({} 字节)", script.len());
 
-        // 清空之前的日志
+        // 清空之前的日志（引擎侧与共享收集器）
         self.logs.clear();
+        if let Ok(mut sink) = self.log_sink.lock() {
+            sink.clear();
+        }
 
         // 执行脚本
         let result = self
@@ -235,6 +244,11 @@ impl ScriptEngine {
             .map_err(|e| FridaError::Script {
                 reason: format!("脚本执行错误: {}", e),
             })?;
+
+        // 收集脚本侧日志
+        if let Ok(sink) = self.log_sink.lock() {
+            self.logs = sink.clone();
+        }
 
         // 构造结果
         let script_result = ScriptResult {
@@ -274,9 +288,12 @@ impl ScriptEngine {
             return Ok(());
         }
 
-        // 重置作用域
+        // 重置作用域与日志
         self.scope.clear();
         self.logs.clear();
+        if let Ok(mut sink) = self.log_sink.lock() {
+            sink.clear();
+        }
 
         // 执行新脚本
         self.execute(new_data)?;
@@ -307,6 +324,9 @@ impl ScriptEngine {
             }
         }
         self.logs.clear();
+        if let Ok(mut sink) = self.log_sink.lock() {
+            sink.clear();
+        }
 
         // 更新状态
         self.state = ScriptState::Destroyed;
@@ -435,14 +455,26 @@ impl Drop for ScriptEngine {
 ///
 /// 将所有宿主 API 注册为 Rhai 引擎的全局函数。
 /// 包括日志、内存操作、Hook 管理、进程信息查询等。
-fn register_apis(engine: &mut rhai::Engine, host_ctx: &mut HostContext) {
+fn register_apis(
+    engine: &mut rhai::Engine,
+    host_ctx: &mut HostContext,
+    log_sink: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
     let target_pid = host_ctx.target_pid.0;
 
-    // 日志函数
-    engine.register_fn("log_info", |msg: &str| {
+    // 日志函数（同时写入共享收集器，供执行结果返回）
+    let sink = log_sink.clone();
+    engine.register_fn("log_info", move |msg: &str| {
+        if let Ok(mut logs) = sink.lock() {
+            logs.push(msg.to_string());
+        }
         log::info!("[脚本] {}", msg);
     });
-    engine.register_fn("log_warn", |msg: &str| {
+    let sink = log_sink.clone();
+    engine.register_fn("log_warn", move |msg: &str| {
+        if let Ok(mut logs) = sink.lock() {
+            logs.push(format!("WARN: {}", msg));
+        }
         log::warn!("[脚本] {}", msg);
     });
 
@@ -655,6 +687,7 @@ mod tests {
         let mut engine = ScriptEngine::new().unwrap();
         let result = engine.execute_text(r#"log_info("hello from test");"#).unwrap();
         assert!(result.value.is_unit());
+        assert!(result.logs.iter().any(|l| l.contains("hello from test")));
     }
 
     #[test]
