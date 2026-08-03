@@ -611,6 +611,70 @@ unsafe fn get_module_name_for_address(
     None
 }
 
+/// 解析十六进制模式串（支持 `??` 通配符，如 "48 8B ?? 90" 或紧凑形式 "488B??90"）
+///
+/// # 返回值
+/// `Some(byte)` 表示固定字节，`None` 表示任意字节（通配符）。
+pub fn parse_hex_pattern(pattern: &str) -> crate::Result<Vec<Option<u8>>> {
+    let trimmed = pattern.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    let mut out = Vec::new();
+
+    if tokens.len() > 1 {
+        // 空格分隔形式："48 8B ?? 90"
+        for tok in tokens {
+            let tok = tok
+                .strip_prefix("0x")
+                .or_else(|| tok.strip_prefix("0X"))
+                .unwrap_or(tok);
+            if tok == "??" {
+                out.push(None);
+            } else if tok.len() == 2 {
+                let byte = u8::from_str_radix(tok, 16).map_err(|_| {
+                    crate::FridaError::Other(format!("无效的十六进制字节: '{}'", tok))
+                })?;
+                out.push(Some(byte));
+            } else {
+                return Err(crate::FridaError::Other(format!(
+                    "无效的模式 token: '{}'（应为 2 位十六进制或 ??）",
+                    tok
+                ))
+                .into());
+            }
+        }
+    } else {
+        // 紧凑形式："488B??90"
+        let compact = trimmed
+            .replace("0x", "")
+            .replace("0X", "")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        if compact.len() % 2 != 0 {
+            return Err(crate::FridaError::Other("模式长度须为偶数".to_string()).into());
+        }
+        let chars: Vec<char> = compact.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '?' && chars[i + 1] == '?' {
+                out.push(None);
+            } else {
+                let hex: String = chars[i..i + 2].iter().collect();
+                let byte = u8::from_str_radix(&hex, 16).map_err(|_| {
+                    crate::FridaError::Other(format!("无效的十六进制字节: '{}'", hex))
+                })?;
+                out.push(Some(byte));
+            }
+            i += 2;
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,11 +704,27 @@ mod tests {
         assert!(pid.0 > 0);
     }
 
+    #[test]
+    fn test_parse_hex_pattern() {
+        // 空格分隔形式
+        let spaced = parse_hex_pattern("48 8B ?? 90").unwrap();
+        assert_eq!(spaced, vec![Some(0x48), Some(0x8B), None, Some(0x90)]);
+
+        // 紧凑形式与 0x 前缀
+        let compact = parse_hex_pattern("0x488B??90").unwrap();
+        assert_eq!(compact, vec![Some(0x48), Some(0x8B), None, Some(0x90)]);
+
+        // 错误输入
+        assert!(parse_hex_pattern("48 8").is_err());
+        assert!(parse_hex_pattern("4? 8B").is_err());
+        assert!(parse_hex_pattern("").unwrap().is_empty());
+    }
+
     /// Windows：向自身进程写入并回读验证（WriteProcessMemory 路径）
     #[cfg(windows)]
     #[test]
     fn test_safe_write_bytes_windows() {
-        let mut buf = vec![0u8; 64];
+        let buf = vec![0u8; 64];
         let pid = current_process_id();
         let data = [0xAAu8, 0xBB, 0xCC, 0xDD];
 

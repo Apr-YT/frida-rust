@@ -265,13 +265,14 @@ impl FridaMcpServer {
         }).await.map_err(|e| McpError::internal_error(format!("{}", e), None))?
     }
 
-    #[tool(description = "搜索内存中的字节模式")]
+    #[tool(description = "搜索内存中的字节模式 (pattern: 十六进制，支持 ?? 通配符，如 \"48 8B ?? 90\")")]
     async fn memory_search(&self, Parameters(p): Parameters<SearchParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
-            let bytes = hex2bytes(&p.pattern)?;
+            let pattern = crate::common::util::parse_hex_pattern(&p.pattern)
+                .map_err(|e| McpError::invalid_params(format!("{}", e), None))?;
             #[cfg(unix)] {
                 let mut s = crate::memory::MemoryScanner::new(ProcessId(p.pid));
-                let r = s.search_bytes(&bytes, None)
+                let r = s.search_wildcard(&pattern, None)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 if r.is_empty() { return Ok("未找到匹配".to_string()); }
                 let mut output = format!("找到 {} 个匹配:\n", r.len());
@@ -283,7 +284,7 @@ impl FridaMcpServer {
             #[cfg(windows)] {
                 let s = crate::memory::win_scanner::WinMemoryScanner::new(p.pid)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
-                let r = s.search_bytes(&bytes)
+                let r = s.search_pattern(&pattern)
                     .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
                 if r.is_empty() { return Ok("未找到匹配".to_string()); }
                 let mut output = format!("找到 {} 个匹配:\n", r.len());

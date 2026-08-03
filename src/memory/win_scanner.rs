@@ -52,14 +52,22 @@ impl WinMemoryScanner {
 
     /// 搜索字节模式
     ///
-    /// 遍历所有已提交的、可读的内存区域，搜索给定的字节模式。
+    /// 兼容旧调用：将固定字节模式包装为 `Option<u8>` 后委托给 [`Self::search_pattern`]。
+    pub fn search_bytes(&self, pattern: &[u8]) -> crate::Result<Vec<u64>> {
+        let pattern: Vec<Option<u8>> = pattern.iter().map(|b| Some(*b)).collect();
+        self.search_pattern(&pattern)
+    }
+
+    /// 搜索内存中的字节模式（`None` 为通配符，匹配任意字节）
+    ///
+    /// 遍历所有已提交的、可读的内存区域，搜索给定的模式。
     ///
     /// # 参数
-    /// - `pattern`: 要搜索的字节模式
+    /// - `pattern`: `Some(byte)` 表示固定字节，`None` 匹配任意字节
     ///
     /// # 返回值
     /// 返回所有匹配的地址列表
-    pub fn search_bytes(&self, pattern: &[u8]) -> crate::Result<Vec<u64>> {
+    pub fn search_pattern(&self, pattern: &[Option<u8>]) -> crate::Result<Vec<u64>> {
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
@@ -85,7 +93,7 @@ impl WinMemoryScanner {
             while offset < size {
                 let want = (size - offset).min(CHUNK_SIZE);
                 let data = self.dump_region_tolerant(region.start as u64 + offset as u64, want);
-                Self::find_pattern_in_data(
+                Self::find_wildcard_in_data(
                     &data,
                     pattern,
                     region.start as u64 + offset as u64,
@@ -257,12 +265,10 @@ impl WinMemoryScanner {
         }
     }
 
-    /// 在数据块中搜索字节模式
-    ///
-    /// 使用逐步扫描算法，在给定数据块中查找所有匹配位置。
-    fn find_pattern_in_data(
+    /// 在数据块中搜索模式（`None` 为通配符，匹配任意字节）
+    fn find_wildcard_in_data(
         data: &[u8],
-        pattern: &[u8],
+        pattern: &[Option<u8>],
         base_addr: u64,
         matches: &mut Vec<u64>,
     ) {
@@ -272,19 +278,19 @@ impl WinMemoryScanner {
 
         let mut idx = 0;
         while idx <= data.len() - pattern.len() {
-            if data[idx] == pattern[0] {
-                let mut found = true;
-                for j in 1..pattern.len() {
-                    if data[idx + j] != pattern[j] {
+            let mut found = true;
+            for (j, byte) in pattern.iter().enumerate() {
+                if let Some(expected) = byte {
+                    if data[idx + j] != *expected {
                         found = false;
                         break;
                     }
                 }
-                if found {
-                    matches.push(base_addr + idx as u64);
-                    idx += pattern.len();
-                    continue;
-                }
+            }
+            if found {
+                matches.push(base_addr + idx as u64);
+                idx += pattern.len();
+                continue;
             }
             idx += 1;
         }
@@ -317,5 +323,29 @@ mod tests {
         let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
         let matches = scanner.search_bytes(&marker).expect("搜索失败");
         assert!(!matches.is_empty(), "应在自身进程堆中找到标记");
+    }
+
+    /// 端到端：在自身进程堆上放置唯一标记，验证通配符模式可扫描到
+    #[test]
+    fn test_search_pattern_wildcard_in_self() {
+        let marker: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0xDE, 0x13, 0x37, 0x99];
+        std::hint::black_box(&marker);
+
+        // 模式：前两个字节固定，中间 4 个字节任意，后两个字节固定
+        let pattern: Vec<Option<u8>> = vec![
+            Some(0xDE),
+            Some(0xAD),
+            None,
+            None,
+            None,
+            None,
+            Some(0x13),
+            Some(0x37),
+        ];
+
+        let pid = crate::common::util::current_process_id().0;
+        let scanner = WinMemoryScanner::new(pid).expect("打开自身进程失败");
+        let matches = scanner.search_pattern(&pattern).expect("搜索失败");
+        assert!(!matches.is_empty(), "应在自身进程堆中找到通配符模式");
     }
 }
