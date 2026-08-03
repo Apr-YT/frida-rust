@@ -21,7 +21,7 @@ name = "frida-rust"
 path = "src/main.rs"
 
 [dependencies]
-rhai = "1.19"
+rhai = { version = "1.19", features = ["sync"] }
 libc = "0.2"
 goblin = "0.9"
 elf = "0.7"

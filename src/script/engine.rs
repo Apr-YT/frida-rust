@@ -319,6 +319,16 @@ impl ScriptEngine {
         &self.logs
     }
 
+    /// 将引擎包装为可跨线程共享的句柄
+    ///
+    /// 返回的 [`ScriptEngineHandle`] 实现 `Send + Clone`，可安全地在多个线程间
+    /// 共享；内部通过互斥锁串行化所有引擎操作，保证并发调用时数据一致。
+    pub fn into_handle(self) -> ScriptEngineHandle {
+        ScriptEngineHandle {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(self)),
+        }
+    }
+
     /// 确保引擎处于运行状态
     fn ensure_running(&self) -> Result<()> {
         if self.state == ScriptState::Destroyed {
@@ -331,6 +341,77 @@ impl ScriptEngine {
             // 允许恢复执行
         }
         Ok(())
+    }
+}
+
+// ======================== 线程安全句柄 ========================
+
+/// 脚本引擎的线程安全句柄
+///
+/// 通过 [`ScriptEngine::into_handle`] 创建。句柄本身实现 `Send + Clone`，
+/// 可安全地跨线程共享；所有引擎操作在内部通过互斥锁串行化执行，
+/// 因此多个线程可以并发调用 [`execute_text`](ScriptEngineHandle::execute_text)
+/// 等接口而不会产生数据竞争。
+#[derive(Clone)]
+pub struct ScriptEngineHandle {
+    /// 共享的脚本引擎（互斥串行化访问）
+    inner: std::sync::Arc<std::sync::Mutex<ScriptEngine>>,
+}
+
+impl ScriptEngineHandle {
+    /// 执行明文脚本（线程安全）
+    pub fn execute_text(&self, script: &str) -> Result<ScriptResult> {
+        self.inner
+            .lock()
+            .map_err(|_| FridaError::Script {
+                reason: "脚本引擎锁被污染（其他线程发生 panic）".to_string(),
+            })?
+            .execute_text(script)
+    }
+
+    /// 执行加密脚本数据（线程安全）
+    pub fn execute(&self, script_data: &[u8]) -> Result<ScriptResult> {
+        self.inner
+            .lock()
+            .map_err(|_| FridaError::Script {
+                reason: "脚本引擎锁被污染（其他线程发生 panic）".to_string(),
+            })?
+            .execute(script_data)
+    }
+
+    /// 执行脚本文件（线程安全）
+    pub fn execute_file(&self, path: &str) -> Result<ScriptResult> {
+        self.inner
+            .lock()
+            .map_err(|_| FridaError::Script {
+                reason: "脚本引擎锁被污染（其他线程发生 panic）".to_string(),
+            })?
+            .execute_file(path)
+    }
+
+    /// 热重载脚本（线程安全）
+    pub fn hot_reload(&self, new_data: &[u8]) -> Result<()> {
+        self.inner
+            .lock()
+            .map_err(|_| FridaError::Script {
+                reason: "脚本引擎锁被污染（其他线程发生 panic）".to_string(),
+            })?
+            .hot_reload(new_data)
+    }
+
+    /// 销毁脚本引擎（线程安全）
+    pub fn destroy(&self) {
+        if let Ok(mut engine) = self.inner.lock() {
+            engine.destroy();
+        }
+    }
+
+    /// 获取引擎状态（线程安全）
+    pub fn state(&self) -> ScriptState {
+        match self.inner.lock() {
+            Ok(engine) => engine.state(),
+            Err(_) => ScriptState::Destroyed,
+        }
     }
 }
 
@@ -590,5 +671,63 @@ mod tests {
         let result = engine.execute_text("42");
         assert!(result.is_err());
     }
-}
 
+    /// 编译期断言：ScriptEngine 可以跨线程传递（Send + Sync）
+    #[test]
+    fn test_script_engine_is_send() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ScriptEngine>();
+    }
+
+    /// 编译期断言：ScriptEngineHandle 可以跨线程共享（Send + Clone）
+    #[test]
+    fn test_script_engine_handle_is_send() {
+        fn assert_send_clone<T: Send + Clone>() {}
+        assert_send_clone::<ScriptEngineHandle>();
+    }
+
+    /// 多线程并发执行：通过线程安全句柄并行执行脚本，结果互不干扰
+    #[test]
+    fn test_script_engine_concurrent_execution() {
+        let handle = ScriptEngine::new()
+            .expect("脚本引擎初始化失败")
+            .into_handle();
+
+        let mut threads = Vec::new();
+        for i in 0..8 {
+            let handle = handle.clone();
+            threads.push(std::thread::spawn(move || {
+                let script = format!("let v = {}; v + 1", i);
+                let result = handle.execute_text(&script).expect("脚本执行失败");
+                assert_eq!(result.value.as_int().unwrap(), i + 1);
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("工作线程异常退出");
+        }
+    }
+
+    /// 多线程共享作用域：一个线程写入变量，其他线程并发读取（互斥锁保证一致性）
+    #[test]
+    fn test_script_engine_shared_scope_across_threads() {
+        let handle = ScriptEngine::new()
+            .expect("脚本引擎初始化失败")
+            .into_handle();
+
+        handle
+            .execute_text("let base = 41;")
+            .expect("作用域初始化失败");
+
+        let mut threads = Vec::new();
+        for _ in 0..4 {
+            let handle = handle.clone();
+            threads.push(std::thread::spawn(move || {
+                let result = handle.execute_text("base + 1").expect("脚本执行失败");
+                assert_eq!(result.value.as_int().unwrap(), 42);
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("工作线程异常退出");
+        }
+    }
+}
