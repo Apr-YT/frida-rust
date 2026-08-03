@@ -27,7 +27,7 @@
 - **内存操作** - 读写搜索全支持
 - **进程分析** - 完整进程信息
 
-## 🔧 MCP 工具 (22个, 按功能模块组织)
+## 🔧 MCP 工具 (24个, 按功能模块组织)
 
 ### process/ - 进程操作
 | 工具 | Unix | Windows |
@@ -75,6 +75,12 @@
 | `symbols_list` | ✅ | ✅ |
 | `symbols_find` | ✅ | ✅ |
 
+### script/ - 脚本执行
+| 工具 | 说明 |
+|------|------|
+| `run_script` | 执行 Rhai 脚本 (script 源码 或 script_file 文件路径; pid 可选目标进程; reset 可选重置) |
+| `script_reset` | 重置脚本引擎 (pid 可选; 重置后脚本作用域清空) |
+
 ### android/ - Android 分析 (Linux/Android 平台)
 | 工具 | 说明 |
 |------|------|
@@ -114,6 +120,9 @@ stealth_apply(pid=12345, auto_detect=true)
 
 # AI 学习
 ai_learn(action="stats")
+
+# 执行脚本
+run_script(script="log_info('hello'); 21 * 2")
 
 # Web UI
 webui_status()
