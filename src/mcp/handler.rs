@@ -108,9 +108,19 @@ struct RunScriptParams {
     pid: Option<u32>,
     /// Rhai 脚本源码
     script: String,
+    /// 脚本文件路径（可选；与 script 二选一，文件内容自动检测加密）
+    #[serde(default)]
+    script_file: Option<String>,
     /// 是否重置引擎（清空作用域后重新初始化）
     #[serde(default)]
     reset: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ScriptResetParams {
+    /// 目标进程 PID（可选；不传则重置当前进程引擎）
+    #[serde(default)]
+    pid: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -784,13 +794,19 @@ impl FridaMcpServer {
 
     // ==================== script/ ====================
 
-    #[tool(description = "执行 Rhai 脚本 (script: Rhai 源码; pid: 可选目标进程; reset: 可选重置引擎)")]
+    #[tool(description = "执行 Rhai 脚本 (script: Rhai 源码 或 script_file: 脚本文件路径; pid: 可选目标进程; reset: 可选重置引擎)")]
     async fn run_script(&self, Parameters(p): Parameters<RunScriptParams>) -> Result<String, McpError> {
         tokio::task::spawn_blocking(move || {
+            if p.script_file.is_none() && p.script.trim().is_empty() {
+                return Err(McpError::invalid_params("script 与 script_file 至少提供一个", None));
+            }
             let handle = get_script_engine(p.pid, p.reset.unwrap_or(false))?;
-            let result = handle
-                .execute_text(&p.script)
-                .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
+            let result = if let Some(path) = p.script_file {
+                handle.execute_file(&path)
+            } else {
+                handle.execute_text(&p.script)
+            }
+            .map_err(|e| McpError::internal_error(format!("{}", e), None))?;
             let mut output = format!("返回值: {}\n", result.value);
             if !result.logs.is_empty() {
                 output.push_str("脚本日志:\n");
@@ -799,6 +815,16 @@ impl FridaMcpServer {
                 }
             }
             Ok(output)
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("{}", e), None))?
+    }
+
+    #[tool(description = "重置脚本引擎 (pid: 可选目标进程；重置后脚本作用域清空)")]
+    async fn script_reset(&self, Parameters(p): Parameters<ScriptResetParams>) -> Result<String, McpError> {
+        tokio::task::spawn_blocking(move || {
+            get_script_engine(p.pid, true)?;
+            Ok(format!("脚本引擎已重置 (PID: {})", p.pid.unwrap_or(0)))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("{}", e), None))?
@@ -922,5 +948,20 @@ mod tests {
             .expect("执行失败");
         assert_eq!(result.value.as_int().unwrap(), 42);
         assert!(result.logs.iter().any(|l| l.contains("mcp hello")));
+    }
+
+    #[test]
+    fn test_run_script_with_file() {
+        let _guard = SCRIPT_TEST_LOCK.lock().unwrap();
+        let path = std::env::temp_dir().join(format!("frida_mcp_test_{}.rhai", std::process::id()));
+        std::fs::write(&path, "21 * 2").expect("写入临时脚本失败");
+
+        let handle = get_script_engine(None, true).expect("获取引擎失败");
+        let result = handle
+            .execute_file(path.to_str().expect("路径非 UTF-8"))
+            .expect("执行脚本文件失败");
+        assert_eq!(result.value.as_int().unwrap(), 42);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
